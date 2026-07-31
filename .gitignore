@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Uploaded scans and generated molds
+data/store/
+out/
+*.stl.bak
+
+# Large sample assets are kept out of git; see README for where to put them.
+data/samples/*.stl
+data/samples/*.ply

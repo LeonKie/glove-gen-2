@@ -1,0 +1,142 @@
+"""The parting surface: a constrained height field, and the solid built from it."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from glovegen import parting
+from glovegen.config import PartingConfig
+from glovegen.frame import Frame
+
+
+def analytic_prism_volume(surface, z_top: float) -> float:
+    """Volume between the height field and ``z_top``, computed independently.
+
+    Uses the same triangulation but sums prism volumes directly, so it is a real
+    cross-check on the extrusion, its winding and its caps.
+    """
+    nx, ny = surface.shape
+    dx = float(surface.xs[1] - surface.xs[0])
+    dy = float(surface.ys[1] - surface.ys[0])
+    idx = np.arange(nx * ny).reshape(nx, ny)
+    h = surface.h.ravel()
+    total = 0.0
+    for a, b, c in (
+        (idx[:-1, :-1], idx[1:, :-1], idx[1:, 1:]),
+        (idx[:-1, :-1], idx[1:, 1:], idx[:-1, 1:]),
+    ):
+        tri = (h[a.ravel()] + h[b.ravel()] + h[c.ravel()]) / 3.0
+        total += 0.5 * dx * dy * float(np.sum(z_top - tri))
+    return total
+
+
+def build(mesh, direction, margin=8.0, grid=120):
+    frame = Frame.from_direction(direction)
+    local = frame.to_local(mesh.convex_hull.vertices)
+    lo = local.min(axis=0) - margin
+    hi = local.max(axis=0) + margin
+    surface = parting.build(
+        mesh, direction, lo[:2], hi[:2], PartingConfig(grid=grid), frame=frame
+    )
+    return surface, lo, hi
+
+
+class TestHeightField:
+    def test_sphere_parts_on_its_equator(self, sphere):
+        """A centred sphere's mid-surface is z=0, so that is where it must split."""
+        surface, _, _ = build(sphere, [0, 0, 1])
+        assert np.abs(surface.h).max() < 1e-6
+
+    def test_stays_inside_the_cavity_band(self, dumbbell):
+        """The invariant everything else rests on: h never leaves the part."""
+        surface, _, _ = build(dumbbell, [1, 0, 0])
+        c = surface.constrained
+        assert c.any()
+        assert np.all(surface.h[c] >= surface.band_lo[c] - 1e-9)
+        assert np.all(surface.h[c] <= surface.band_hi[c] + 1e-9)
+
+    def test_band_collapses_at_the_silhouette(self, sphere):
+        """Where the part thins to nothing the surface is pinned to it exactly."""
+        surface, _, _ = build(sphere, [0, 0, 1], grid=160)
+        c = surface.constrained
+        thickness = (surface.band_hi - surface.band_lo)[c]
+        assert thickness.min() < 0.5  # silhouette columns
+        assert thickness.max() > 30.0  # straight through the middle
+
+    def test_unconstrained_columns_interpolate_smoothly(self, dumbbell):
+        surface, _, _ = build(dumbbell, [1, 0, 0])
+        assert (~surface.constrained).any()
+        assert np.all(np.isfinite(surface.h))
+
+    def test_grid_spans_the_requested_footprint(self, sphere):
+        surface, lo, hi = build(sphere, [0, 0, 1])
+        assert surface.xs[0] == pytest.approx(lo[0])
+        assert surface.xs[-1] == pytest.approx(hi[0])
+        assert surface.ys[0] == pytest.approx(lo[1])
+        assert surface.ys[-1] == pytest.approx(hi[1])
+
+    def test_rejects_a_direction_that_misses_the_part(self, sphere):
+        frame = Frame.from_direction([0, 0, 1])
+        with pytest.raises(ValueError, match="no ray column"):
+            parting.build(
+                sphere, [0, 0, 1], [500, 500], [520, 520], PartingConfig(grid=20),
+                frame=frame,
+            )
+
+    def test_report_is_json_friendly(self, sphere):
+        surface, _, _ = build(sphere, [0, 0, 1])
+        rep = surface.report()
+        assert rep["constrained_columns"] > 0
+        assert rep["total_columns"] >= rep["constrained_columns"]
+        assert rep["cell_mm"] > 0
+
+
+class TestPartingSolid:
+    def test_volume_matches_the_analytic_prism(self, sphere):
+        surface, _, hi = build(sphere, [0, 0, 1])
+        z_top = float(hi[2]) + 1.0
+        solid = surface.solid(z_top)
+        assert solid.volume == pytest.approx(
+            analytic_prism_volume(surface, z_top), rel=1e-9
+        )
+
+    def test_solid_is_watertight(self, dumbbell):
+        surface, _, hi = build(dumbbell, [1, 0, 0])
+        solid = surface.solid(float(hi[2]) + 1.0)
+        assert solid.is_watertight
+        assert solid.volume > 0
+
+    def test_solid_covers_the_whole_footprint(self, sphere):
+        surface, lo, hi = build(sphere, [0, 0, 1])
+        solid = surface.solid(float(hi[2]) + 1.0)
+        frame = surface.frame
+        local = frame.to_local(solid.vertices)
+        assert local[:, 0].min() == pytest.approx(surface.xs[0], abs=1e-6)
+        assert local[:, 0].max() == pytest.approx(surface.xs[-1], abs=1e-6)
+
+    def test_rejects_a_z_top_below_the_surface(self, sphere):
+        surface, _, _ = build(sphere, [0, 0, 1])
+        with pytest.raises(ValueError, match="not above"):
+            surface.solid(float(surface.h.min()) - 5.0)
+
+    def test_surface_mesh_is_an_open_sheet(self, sphere):
+        surface, _, _ = build(sphere, [0, 0, 1])
+        sheet = surface.surface_mesh()
+        nx, ny = surface.shape
+        assert len(sheet.faces) == 2 * (nx - 1) * (ny - 1)
+        assert not sheet.is_watertight  # it is a sheet, not a solid
+
+
+class TestSmoothing:
+    def test_higher_lambda_flattens_the_surface(self, dumbbell):
+        frame = Frame.from_direction([1, 0, 0])
+        local = frame.to_local(dumbbell.convex_hull.vertices)
+        lo, hi = local.min(axis=0) - 8, local.max(axis=0) + 8
+
+        def roughness(lam):
+            cfg = PartingConfig(grid=100, smooth_lambda=lam)
+            s = parting.build(dumbbell, [1, 0, 0], lo[:2], hi[:2], cfg, frame=frame)
+            return float(np.abs(np.diff(s.h, axis=0)).mean())
+
+        assert roughness(50.0) <= roughness(0.05) + 1e-12

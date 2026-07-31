@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glovegen — mold generator</title>
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="app">
+
+  <aside id="sidebar">
+    <header>
+      <h1>glovegen</h1>
+      <p class="sub">positive scan &rarr; printable 2-part mold</p>
+    </header>
+
+    <section class="panel" id="panel-upload">
+      <h2>1 · Scan</h2>
+      <div id="dropzone">
+        <input type="file" id="file-input" accept=".stl,.ply,.obj,.off,.glb" hidden>
+        <button class="primary" id="btn-browse">Choose a mesh…</button>
+        <p class="hint">or drop an STL here</p>
+      </div>
+      <div id="upload-status" class="status" hidden></div>
+      <select id="mesh-select" hidden></select>
+      <dl id="mesh-stats" class="stats" hidden></dl>
+    </section>
+
+    <section class="panel disabled" id="panel-direction">
+      <h2>2 · Pull direction</h2>
+      <p class="hint">
+        One half pulls along <b>+d</b>, the other along <b>−d</b>. Red marks
+        geometry neither half can reach — where a flexible cast has to flex out.
+      </p>
+      <div class="row">
+        <label for="az">Azimuth <span class="val" id="az-val">0°</span></label>
+        <input type="range" id="az" min="-180" max="180" step="1" value="0">
+      </div>
+      <div class="row">
+        <label for="el">Elevation <span class="val" id="el-val">0°</span></label>
+        <input type="range" id="el" min="-90" max="90" step="1" value="0">
+      </div>
+      <div class="btn-row">
+        <button id="btn-suggest" class="primary">Suggest best</button>
+        <button id="btn-from-view">From view</button>
+      </div>
+      <div id="suggest-status" class="status" hidden></div>
+      <dl id="undercut-stats" class="stats" hidden></dl>
+    </section>
+
+    <section class="panel disabled" id="panel-mold">
+      <h2>3 · Mold</h2>
+      <div class="row">
+        <label for="margin">Wall margin <span class="val" id="margin-val">10 mm</span></label>
+        <input type="range" id="margin" min="3" max="30" step="0.5" value="10">
+      </div>
+      <div class="row">
+        <label for="block-shape">Block</label>
+        <select id="block-shape">
+          <option value="box" selected>Box (rectangular)</option>
+          <option value="hull">Dilated hull (less material)</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="grid">Parting grid <span class="val" id="grid-val">400</span></label>
+        <input type="range" id="grid" min="120" max="700" step="20" value="400">
+      </div>
+      <div class="row checks">
+        <label><input type="checkbox" id="opt-keys" checked> Alignment keys</label>
+        <label><input type="checkbox" id="opt-spout" checked> Pour spout</label>
+        <label><input type="checkbox" id="opt-vents" checked> Vents</label>
+      </div>
+      <button class="primary big" id="btn-build">Build mold</button>
+      <div id="build-status" class="status" hidden></div>
+      <div id="build-progress" class="progress" hidden><div class="bar"></div></div>
+    </section>
+
+    <section class="panel" id="panel-result" hidden>
+      <h2>4 · Result</h2>
+      <dl id="result-stats" class="stats"></dl>
+      <div id="downloads"></div>
+    </section>
+
+    <footer>
+      <button id="btn-jobs" class="link">History</button>
+      <span id="store-usage"></span>
+    </footer>
+  </aside>
+
+  <main id="stage">
+    <canvas id="canvas"></canvas>
+    <div id="layers">
+      <button data-layer="part" class="active">Scan</button>
+      <button data-layer="half_a" disabled>Half A</button>
+      <button data-layer="half_b" disabled>Half B</button>
+      <button data-layer="parting" disabled>Parting</button>
+    </div>
+    <div id="legend" hidden>
+      <span class="swatch ok"></span> releases
+      <span class="swatch mid"></span> shallow
+      <span class="swatch bad"></span> trapped
+    </div>
+    <div id="hud"></div>
+    <div id="jobs-drawer" hidden><h3>History</h3><div id="jobs-list"></div></div>
+  </main>
+
+</div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
