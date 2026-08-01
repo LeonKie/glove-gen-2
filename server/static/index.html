@@ -80,21 +80,21 @@
     </section>
 
     <section class="panel" id="panel-features" hidden>
-      <h2>4 · Knobs &amp; holes</h2>
+      <h2>4 · Knobs &amp; holes <button id="btn-plan-reset" class="link">reset</button></h2>
       <p class="hint">
-        Placed automatically. Resize, switch off, or add your own — then
-        re-apply. Only the features are re-cut, not the mold.
+        Placed automatically. A size set on a group moves every item in it;
+        click a row to size that one on its own. Click a marker in the viewport
+        to find its row. Re-applying re-cuts only the features, not the mold.
       </p>
-      <div class="btn-row">
-        <button id="btn-add-key">+ Knob</button>
-        <button id="btn-add-spout">+ Spout</button>
-        <button id="btn-add-vent">+ Vent</button>
-        <button id="btn-plan-reset">Reset</button>
-      </div>
       <div id="feature-list"></div>
-      <button class="primary big" id="btn-apply-features">Re-apply features</button>
-      <div id="features-status" class="status" hidden></div>
-      <div id="features-progress" class="progress" hidden><div class="bar"></div></div>
+      <div class="apply">
+        <div class="row checks">
+          <label><input type="checkbox" id="opt-verify" checked> Check the mold still opens</label>
+        </div>
+        <button class="primary big" id="btn-apply-features">Re-apply features</button>
+        <div id="features-status" class="status" hidden></div>
+        <div id="features-progress" class="progress" hidden><div class="bar"></div></div>
+      </div>
     </section>
 
     <section class="panel" id="panel-result" hidden>
