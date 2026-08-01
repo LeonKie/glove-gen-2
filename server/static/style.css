@@ -15,6 +15,11 @@
 
 * { box-sizing: border-box; }
 
+/* The UA rule for [hidden] is display:none at zero specificity, so any id or
+   class rule setting display (the legend, the layer bar) silently overrides
+   it and the element stays on screen. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;
@@ -92,6 +97,7 @@ button.link {
 
 .btn-row { display: flex; gap: 8px; margin-top: 4px; }
 .btn-row button { flex: 1; }
+.btn-row button.active { border-color: var(--accent); color: var(--accent); }
 
 .row { margin-bottom: 12px; }
 .row label {
@@ -165,6 +171,56 @@ select {
 }
 #downloads a:hover { border-color: var(--accent); }
 #downloads a span { color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* ---------- feature plan ---------- */
+
+#feature-list { margin: 10px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+#feature-list .empty { color: var(--dim); font-size: 12px; }
+
+.feat {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 7px 9px;
+}
+.feat.off { opacity: 0.5; }
+.feat.skipped { border-color: var(--bad); }
+
+.feat-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.feat-head input[type=checkbox] { margin: 0; }
+.feat-head .name { font-weight: 600; }
+.feat-head .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
+.feat-head .dot.key { background: #52a8ff; }
+.feat-head .dot.spout { background: var(--ok); }
+.feat-head .dot.vent { background: var(--warn); }
+.feat-head .note { color: var(--dim); margin-left: auto; font-size: 11px; }
+.feat-head .del {
+  background: none; border: none; color: var(--dim);
+  padding: 0 2px; font-size: 13px; line-height: 1;
+}
+.feat-head .del:hover { color: var(--bad); background: none; border: none; }
+
+.feat-params { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 7px; }
+.feat-params label {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--dim);
+}
+.feat-params input[type=number] {
+  width: 54px; font: inherit; font-size: 11px;
+  color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 2px 4px; font-variant-numeric: tabular-nums;
+}
+.feat-params input[type=number]:focus { outline: none; border-color: var(--accent); }
+.feat-why { margin-top: 6px; font-size: 11px; color: #ffb4aa; }
+
+#place-hint {
+  position: absolute; top: 60px; left: 50%; transform: translateX(-50%);
+  background: rgba(20, 23, 28, 0.9);
+  border: 1px solid var(--accent); border-radius: var(--radius);
+  padding: 7px 12px; font-size: 12px;
+  backdrop-filter: blur(6px);
+}
 
 /* ---------- stage ---------- */
 

@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from glovegen import demold, viewer_format
 from glovegen.config import MoldConfig
+from glovegen.features import PARAM_BOUNDS, FeaturePlan
 
 from .store import Store
 from .worker import run_job
@@ -228,17 +229,60 @@ def mesh_heatmap(mesh_id: str, payload: dict = Body(...)):
 # --------------------------------------------------------------------------
 
 
+def _resolve_base_job(source_id: str) -> tuple[str, dict]:
+    """Find the mold job whose cached base a feature edit should re-cut.
+
+    Editing an edit must not stack booleans on booleans: every feature job
+    starts again from the halves as they came out of the split, so the source
+    of a features job is the base its own source used.
+    """
+    src = store.get_job(source_id)
+    if src is None:
+        raise HTTPException(404, f"no job {source_id}")
+    if src.get("state") != "done":
+        raise HTTPException(409, f"job {source_id} is {src.get('state')}, not done")
+    base_id = (src.get("result") or {}).get("base_job") or source_id
+    if not (store.job_dir(base_id) / "context.json").exists():
+        raise HTTPException(
+            409, f"job {source_id} has no cached mold to re-cut features into"
+        )
+    return base_id, src
+
+
 @app.post("/api/jobs")
 def create_job(payload: dict = Body(...)) -> dict:
     mesh_id = payload.get("mesh_id")
     kind = payload.get("kind", "mold")
-    if kind not in ("analyze", "mold"):
-        raise HTTPException(422, "kind must be 'analyze' or 'mold'")
+    if kind not in ("analyze", "mold", "features"):
+        raise HTTPException(422, "kind must be 'analyze', 'mold' or 'features'")
+    config = dict(payload.get("config") or {})
+
+    if kind == "features":
+        source_id = config.get("source_job") or config.get("base_job")
+        if not source_id:
+            raise HTTPException(422, "a features job needs config.source_job")
+        base_id, src = _resolve_base_job(str(source_id))
+        try:
+            plan = FeaturePlan.from_dict(config.get("plan") or {}).normalised()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, f"bad feature plan: {exc}") from exc
+        return {
+            "job": _submit(
+                kind,
+                src["mesh_id"],
+                {
+                    "source_job": str(source_id),
+                    "base_job": base_id,
+                    "plan": plan.as_dict(),
+                    "verify": bool(config.get("verify", True)),
+                },
+            )
+        }
+
     meta = _require_mesh(mesh_id)
     if meta.get("state") != "ready":
         raise HTTPException(409, f"mesh is {meta.get('state')}, not ready")
 
-    config = payload.get("config") or {}
     # Validate the config here so a typo fails the request, not the job.
     direction = config.pop("direction", None)
     try:
@@ -297,6 +341,11 @@ def status() -> dict:
     return {
         "version": app.version,
         "defaults": MoldConfig().to_dict(),
+        # What a client may set per feature, and the range it is clamped to.
+        "feature_params": {
+            kind: {name: list(rng) for name, rng in params.items()}
+            for kind, params in PARAM_BOUNDS.items()
+        },
         "limits": {"max_upload_mb": MAX_UPLOAD_MB, "workers": MAX_WORKERS},
         "storage": store.usage(),
     }

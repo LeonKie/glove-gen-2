@@ -19,12 +19,25 @@ point is *above* the mouth, and the cast inside it is locked in. So channels are
 either centred on the parting surface (giving each half a clean half-round
 groove, widest exactly at the mouth) or routed along the pull direction, where
 they release by construction. Never in between.
+
+Choosing is separate from cutting
+---------------------------------
+*Where* the knobs and holes go is a :class:`FeaturePlan`: a plain, serialisable
+list of items, each with a world position and its own sizes. Building one is
+cheap (ray casts and a distance transform); applying one is the expensive part
+(a boolean per item on million-face halves).
+
+Keeping the two apart is what lets the same code be automatic in one place and
+interactive in another. The CLI runs :func:`plan_features` and
+:func:`apply_plan` back to back, so it stays hands-off. The web app builds the
+mold, shows the proposal, and re-applies an edited plan to the *base* halves --
+which costs the features only, not the block, the parting surface or the split.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import trimesh
@@ -119,6 +132,253 @@ def _difference(a, b, label="difference"):
 
 
 # --------------------------------------------------------------------------
+# the plan
+# --------------------------------------------------------------------------
+
+KINDS = ("key", "spout", "vent")
+
+# Sizes a caller may set per item, with the range each is clamped to. The
+# bounds are sanity rails, not opinions: they keep a stray unit (metres for
+# millimetres) or a typo'd zero from producing a boolean that runs for minutes
+# and returns garbage. The web app mirrors them on its number inputs; this is
+# the side that is enforced.
+PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
+    "key": {
+        "radius": (0.5, 50.0),
+        "height": (0.5, 50.0),
+        "draft_deg": (0.0, 45.0),
+        "clearance": (0.0, 3.0),
+    },
+    "spout": {"inner_radius": (0.5, 60.0), "outer_radius": (0.5, 80.0)},
+    "vent": {"radius": (0.2, 20.0)},
+}
+
+
+class FeatureSkipped(Exception):
+    """This item cannot be cut where it was asked for, and why."""
+
+
+def _defaults_for(kind: str, cfg: MoldConfig | None = None) -> dict[str, float]:
+    cfg = cfg or MoldConfig()
+    if kind == "key":
+        k: KeyConfig = cfg.keys
+        return {
+            "radius": k.radius,
+            "height": k.height,
+            "draft_deg": k.draft_deg,
+            "clearance": k.clearance,
+        }
+    if kind == "spout":
+        s: SpoutConfig = cfg.spout
+        return {"inner_radius": s.inner_radius, "outer_radius": s.outer_radius}
+    if kind == "vent":
+        v: VentConfig = cfg.vents
+        return {"radius": v.radius}
+    raise ValueError(f"unknown feature kind {kind!r}, expected one of {KINDS}")
+
+
+def _clean_params(kind: str, params: dict | None, cfg: MoldConfig | None = None) -> dict:
+    """Fill in defaults for anything missing and clamp everything else."""
+    defaults = _defaults_for(kind, cfg)
+    given = dict(params or {})
+    out: dict[str, float] = {}
+    for name, (lo, hi) in PARAM_BOUNDS[kind].items():
+        raw = given.get(name, defaults[name])
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{kind}.{name} must be a number, got {raw!r}") from exc
+        if not np.isfinite(value):
+            raise ValueError(f"{kind}.{name} must be finite, got {raw!r}")
+        out[name] = float(np.clip(value, lo, hi))
+    return out
+
+
+def _clean_vector(value, name: str) -> list[float]:
+    v = np.asarray(value, dtype=np.float64).reshape(-1)
+    if v.shape != (3,) or not np.isfinite(v).all():
+        raise ValueError(f"{name} must be three finite numbers, got {value!r}")
+    return [float(x) for x in v]
+
+
+@dataclass
+class FeatureItem:
+    """One knob or hole: what it is, where it goes, how big it is."""
+
+    kind: str
+    position: list[float]  # world coordinates
+    params: dict = field(default_factory=dict)
+    enabled: bool = True
+    id: str = ""
+    source: str = "auto"  # "auto" (proposed) or "user" (placed by hand)
+    note: str = ""  # why the automatic pass chose this spot
+
+    def normalised(self, cfg: MoldConfig | None = None) -> "FeatureItem":
+        if self.kind not in KINDS:
+            raise ValueError(f"unknown feature kind {self.kind!r}, expected one of {KINDS}")
+        return replace(
+            self,
+            position=_clean_vector(self.position, f"{self.kind} position"),
+            params=_clean_params(self.kind, self.params, cfg),
+            enabled=bool(self.enabled),
+            source="user" if self.source == "user" else "auto",
+            note=str(self.note or ""),
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "enabled": bool(self.enabled),
+            "source": self.source,
+            "position": [round(float(v), 3) for v in self.position],
+            "params": {k: round(float(v), 4) for k, v in self.params.items()},
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FeatureItem":
+        data = dict(data or {})
+        return cls(
+            kind=str(data.get("kind", "")),
+            position=data.get("position", [0.0, 0.0, 0.0]),
+            params=data.get("params") or {},
+            enabled=bool(data.get("enabled", True)),
+            id=str(data.get("id", "")),
+            source=str(data.get("source", "auto")),
+            note=str(data.get("note", "")),
+        )
+
+
+@dataclass
+class FeaturePlan:
+    """Every knob and hole to cut, in the order they get cut."""
+
+    items: list[FeatureItem] = field(default_factory=list)
+    pour_axis: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0])
+
+    def of_kind(self, kind: str) -> list[FeatureItem]:
+        return [i for i in self.items if i.kind == kind]
+
+    def enabled_items(self) -> list[FeatureItem]:
+        """Enabled items, grouped by kind so a run is reproducible.
+
+        Keys go in before holes are cut: a socket swept out of half B must not
+        be re-filled by a later union, and cutting the spout after the keys
+        means a spout that clips a key still leaves a usable half.
+        """
+        order = {kind: n for n, kind in enumerate(KINDS)}
+        return sorted(
+            (i for i in self.items if i.enabled), key=lambda i: order[i.kind]
+        )
+
+    def normalised(self, cfg: MoldConfig | None = None) -> "FeaturePlan":
+        """Validate every item, clamp sizes, and give everything a unique id.
+
+        Ids come back from a browser, so they are treated as suggestions:
+        blanks and collisions are resolved here rather than trusted, because
+        the report keys off them.
+        """
+        seen: set[str] = set()
+        out: list[FeatureItem] = []
+        for n, item in enumerate(self.items, start=1):
+            item = item.normalised(cfg)
+            ident = item.id.strip() or f"{item.kind}-{n}"
+            while ident in seen:
+                ident = f"{ident}'"
+            seen.add(ident)
+            out.append(replace(item, id=ident))
+        return FeaturePlan(items=out, pour_axis=_clean_vector(self.pour_axis, "pour_axis"))
+
+    def as_dict(self) -> dict:
+        return {
+            "pour_axis": [round(float(v), 4) for v in self.pour_axis],
+            "items": [i.as_dict() for i in self.items],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict | "FeaturePlan") -> "FeaturePlan":
+        if isinstance(data, FeaturePlan):
+            return data
+        data = dict(data or {})
+        raw = data.get("items")
+        if raw is None:
+            raw = []
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError("feature plan 'items' must be a list")
+        return cls(
+            items=[FeatureItem.from_dict(i) for i in raw],
+            pour_axis=data.get("pour_axis") or [0.0, 0.0, 1.0],
+        )
+
+
+@dataclass
+class FeatureContext:
+    """Everything a feature needs to know about the mold it is cut into.
+
+    Deliberately smaller than :class:`~glovegen.mold.MoldResult`: the block and
+    the uncut mold are not needed to place or cut a feature, so a re-apply can
+    reconstruct this from the parting surface, the block's bounds and the
+    cavity alone -- none of which have to be recomputed.
+    """
+
+    surface: PartingSurface
+    local_bounds: np.ndarray  # (2, 3) block extent in the pull frame
+    cavity: trimesh.Trimesh
+    _free_dist: np.ndarray | None = field(default=None, repr=False)
+
+    @classmethod
+    def from_mold(
+        cls, result: MoldResult, cavity: trimesh.Trimesh | None = None
+    ) -> "FeatureContext":
+        return cls(
+            surface=result.surface,
+            local_bounds=np.asarray(result.local_bounds, dtype=np.float64),
+            cavity=cavity if cavity is not None else result.cavity,
+        )
+
+    @property
+    def frame(self) -> Frame:
+        return self.surface.frame
+
+    @property
+    def direction(self) -> np.ndarray:
+        return self.surface.frame.direction
+
+    def free_distance(self) -> np.ndarray:
+        """Distance from each grid node to the nearest column hitting the part.
+
+        Zero on columns that pass through the cavity, so it doubles as the
+        "how much room is there for a knob here" field. Cached: the transform
+        is cheap but every key placement asks for it.
+        """
+        if self._free_dist is None:
+            surface = self.surface
+            nx, ny = surface.shape
+            dx = float(surface.xs[1] - surface.xs[0]) if nx > 1 else 1.0
+            dy = float(surface.ys[1] - surface.ys[0]) if ny > 1 else 1.0
+            self._free_dist = ndimage.distance_transform_edt(
+                ~surface.constrained, sampling=(dx, dy)
+            )
+        return self._free_dist
+
+    def node_index(self, local_xy) -> tuple[int, int]:
+        """Nearest grid node to a local (x, y)."""
+        surface = self.surface
+        i = int(np.clip(np.searchsorted(surface.xs, local_xy[0]), 0, len(surface.xs) - 1))
+        j = int(np.clip(np.searchsorted(surface.ys, local_xy[1]), 0, len(surface.ys) - 1))
+        return i, j
+
+    def on_parting(self, world_point) -> tuple[np.ndarray, tuple[int, int]]:
+        """Drop a world point onto the parting surface, in local coordinates."""
+        local = self.frame.to_local(np.asarray(world_point, dtype=np.float64).reshape(3))
+        i, j = self.node_index(local)
+        local = local.copy()
+        local[2] = float(self.surface.h[i, j])
+        return local, (i, j)
+
+
+# --------------------------------------------------------------------------
 # alignment keys
 # --------------------------------------------------------------------------
 
@@ -138,24 +398,20 @@ class KeySite:
         }
 
 
-def find_key_sites(
-    surface: PartingSurface,
-    local_bounds: np.ndarray,
-    cfg: KeyConfig,
-) -> list[KeySite]:
+def find_key_sites(ctx: FeatureContext, cfg: KeyConfig) -> list[KeySite]:
     """Pick well-spread spots on the parting face that clear the cavity.
 
     Keys must sit where the parting face is solid mold on both sides, i.e. in
     columns that miss the part entirely, with room for the key body above and
     the socket below.
     """
+    surface = ctx.surface
     nx, ny = surface.shape
     dx = float(surface.xs[1] - surface.xs[0]) if nx > 1 else 1.0
     dy = float(surface.ys[1] - surface.ys[0]) if ny > 1 else 1.0
 
     free = ~surface.constrained
-    # Distance from each free cell to the nearest column that hits the part.
-    dist = ndimage.distance_transform_edt(free, sampling=(dx, dy))
+    dist = ctx.free_distance()
 
     need = cfg.radius + cfg.cavity_margin
     ok = free & (dist >= need)
@@ -168,8 +424,8 @@ def find_key_sites(
     ok &= edge
 
     # Vertical room: key body hangs below the surface, socket above it.
-    room_below = surface.h - local_bounds[0, 2]
-    room_above = local_bounds[1, 2] - surface.h
+    room_below = surface.h - ctx.local_bounds[0, 2]
+    room_above = ctx.local_bounds[1, 2] - surface.h
     ok &= room_below >= (cfg.height + 2.0)
     ok &= room_above >= 2.0
 
@@ -208,67 +464,72 @@ def find_key_sites(
     return sites
 
 
-def add_keys(
+def _apply_key(
     half_a: trimesh.Trimesh,
     half_b: trimesh.Trimesh,
-    surface: PartingSurface,
-    local_bounds: np.ndarray,
-    cfg: KeyConfig,
+    ctx: FeatureContext,
+    item: FeatureItem,
 ) -> tuple[trimesh.Trimesh, trimesh.Trimesh, dict]:
-    """Add male keys to half A and matching sockets to half B.
+    """Add one male key to half A and its matching socket to half B.
 
     The key hangs *down* from A's parting face and widens upward at the draft
     angle, so it withdraws from its socket along +d as the halves part.
     """
-    sites = find_key_sites(surface, local_bounds, cfg)
-    if not sites:
-        return half_a, half_b, {"count": 0, "sites": []}
+    p = item.params
+    radius, height = p["radius"], p["height"]
+    local, (i, j) = ctx.on_parting(item.position)
+    z = float(local[2])
 
-    draft = np.tan(np.radians(cfg.draft_deg))
+    # A key is only mold-on-both-sides where the column misses the part, and it
+    # needs its whole footprint clear -- a knob that breaks into the cavity
+    # would print into the cast and open the socket into it.
+    clearance = float(ctx.free_distance()[i, j])
+    if clearance < radius:
+        raise FeatureSkipped(
+            f"only {clearance:.1f} mm to the cavity, needs {radius:.1f} mm for the knob"
+        )
+    if z - height - 2.0 < float(ctx.local_bounds[0, 2]):
+        raise FeatureSkipped("not enough mold below the parting face for the knob")
+    if float(ctx.local_bounds[1, 2]) - z < 2.0:
+        raise FeatureSkipped("not enough mold above the parting face for the socket")
+
+    draft = np.tan(np.radians(p["draft_deg"]))
+    r_bottom = max(radius - height * draft, 0.35 * radius)
+    c = p["clearance"]
     overlap = 3.0  # merge depth into A's body, avoids a coplanar boolean
+    z_sweep = float(ctx.local_bounds[1, 2]) + 1.0
 
-    r_mouth = cfg.radius
-    r_bottom = max(r_mouth - cfg.height * draft, 0.35 * r_mouth)
-    c = cfg.clearance
-    z_sweep = float(local_bounds[1, 2]) + 1.0
+    key = revolved(
+        [
+            (r_bottom, z - height),
+            (radius, z),
+            (radius, z + overlap),
+        ]
+    )
+    key = _place_local(key, ctx.frame, (local[0], local[1], 0.0))
+    half_a = _union(half_a, key, "key -> A")
 
-    for site in sites:
-        # Key: drafted below the parting face so it self-locates, then a plain
-        # cylinder above it that just merges into A's body.
-        key = revolved(
-            [
-                (r_bottom, site.z - cfg.height),
-                (r_mouth, site.z),
-                (r_mouth, site.z + overlap),
-            ]
-        )
-        key = _place_local(key, surface.frame, (site.x, site.y, 0.0))
-        half_a = _union(half_a, key, "key -> A")
+    # Socket: the key's *swept* volume as it withdraws along +d, not just its
+    # resting shape. The parting surface is curved, so half B can hold material
+    # above the key's mouth within the key's own footprint; without sweeping the
+    # socket to the top of the block, the key would jam on it.
+    socket = revolved(
+        [
+            (r_bottom + c, z - height - c),
+            (radius + c, z),
+            (radius + c, z_sweep),
+        ]
+    )
+    socket = _place_local(socket, ctx.frame, (local[0], local[1], 0.0))
+    half_b = _difference(half_b, socket, "socket -> B")
 
-        # Socket: the key's *swept* volume as it withdraws along +d, not just
-        # its resting shape. The parting surface is curved, so half B can hold
-        # material above the key's mouth within the key's own footprint; without
-        # sweeping the socket to the top of the block, the key would jam on it.
-        socket = revolved(
-            [
-                (r_bottom + c, site.z - cfg.height - c),
-                (r_mouth + c, site.z),
-                (r_mouth + c, z_sweep),
-            ]
-        )
-        socket = _place_local(socket, surface.frame, (site.x, site.y, 0.0))
-        half_b = _difference(half_b, socket, "socket -> B")
-
-    info = {
-        "count": len(sites),
-        "radius_mm": cfg.radius,
-        "height_mm": cfg.height,
-        "draft_deg": cfg.draft_deg,
-        "clearance_mm": cfg.clearance,
-        "sites": [s.as_dict() for s in sites],
-    }
-    log.info("added %d alignment keys", len(sites))
-    return half_a, half_b, info
+    detail = KeySite(
+        x=float(local[0]), y=float(local[1]), z=z, clearance_to_cavity=clearance
+    ).as_dict()
+    detail["id"] = item.id
+    detail["radius_mm"] = round(radius, 2)
+    detail["height_mm"] = round(height, 2)
+    return half_a, half_b, detail
 
 
 # --------------------------------------------------------------------------
@@ -313,43 +574,48 @@ def choose_pour_axis(mesh: trimesh.Trimesh, cfg: MoldConfig) -> np.ndarray:
 # --------------------------------------------------------------------------
 
 
-def add_spout(
-    half_a: trimesh.Trimesh,
-    half_b: trimesh.Trimesh,
-    cavity: trimesh.Trimesh,
-    surface: PartingSurface,
-    local_bounds: np.ndarray,
-    pour_axis: np.ndarray,
-    cfg: SpoutConfig,
-) -> tuple[trimesh.Trimesh, trimesh.Trimesh, dict]:
-    """Cut a funnel from the outside of the block into the top of the cavity.
+def spout_entry(
+    cavity: trimesh.Trimesh, ctx: FeatureContext, pour_axis: np.ndarray
+) -> np.ndarray:
+    """Where the funnel should break into the cavity, in world coordinates.
 
-    Placed at the cavity's extreme along the pour axis, which is the highest
-    point of the cavity once the mold is stood up to pour, and centred on the
-    parting surface so each half gets a clean half-round groove.
+    The cavity's extreme along the pour axis -- its highest point once the mold
+    is stood up to pour -- pulled onto the parting surface so each half gets a
+    clean half-round groove.
     """
-    pour_axis = unit(pour_axis)
     v = np.asarray(cavity.vertices, dtype=np.float64)
-    proj = v @ pour_axis
+    proj = v @ unit(pour_axis)
     top = proj >= np.percentile(proj, 99.5)
     entry_world = v[top].mean(axis=0)
+    # Over the short run through the block wall the parting surface barely
+    # moves, so centring on it keeps the groove half-round to within a fraction
+    # of a millimetre.
+    local, _ = ctx.on_parting(entry_world)
+    return ctx.frame.to_world(local)
 
-    # Centre the channel on the parting surface: sample h at the entry's
-    # in-plane position. Over the short run through the block wall the surface
-    # barely moves, so this keeps the groove half-round to within a fraction of
-    # a millimetre.
-    entry_local = surface.frame.to_local(entry_world)
-    i = int(np.clip(np.searchsorted(surface.xs, entry_local[0]), 0, len(surface.xs) - 1))
-    j = int(np.clip(np.searchsorted(surface.ys, entry_local[1]), 0, len(surface.ys) - 1))
-    entry_local[2] = float(surface.h[i, j])
-    entry_world = surface.frame.to_world(entry_local)
+
+def _apply_spout(
+    half_a: trimesh.Trimesh,
+    half_b: trimesh.Trimesh,
+    ctx: FeatureContext,
+    item: FeatureItem,
+    pour_axis: np.ndarray,
+) -> tuple[trimesh.Trimesh, trimesh.Trimesh, dict]:
+    """Cut one funnel from the outside of the block into the cavity."""
+    pour_axis = unit(pour_axis)
+    local, _ = ctx.on_parting(item.position)
+    entry_world = ctx.frame.to_world(local)
 
     # Run from just inside the cavity out past the block's furthest face.
     start = entry_world - pour_axis * 3.0
-    reach = float((_block_corners_world(local_bounds, surface.frame) @ pour_axis).max())
+    reach = float((_block_corners_world(ctx.local_bounds, ctx.frame) @ pour_axis).max())
     length = reach - float(start @ pour_axis) + 3.0
+    if length <= 1.0:
+        raise FeatureSkipped("spout entry is outside the block along the pour axis")
 
-    funnel = frustum(cfg.inner_radius, cfg.outer_radius, length, sections=64)
+    funnel = frustum(
+        item.params["inner_radius"], item.params["outer_radius"], length, sections=64
+    )
     rot = trimesh.geometry.align_vectors([0.0, 0.0, 1.0], pour_axis)
     funnel.apply_transform(rot)
     funnel.apply_translation(start)
@@ -357,15 +623,16 @@ def add_spout(
     half_a = _difference(half_a, funnel, "spout -> A")
     half_b = _difference(half_b, funnel, "spout -> B")
 
-    info = {
+    detail = {
+        "id": item.id,
         "entry_world": [round(float(x), 2) for x in entry_world],
         "axis": [round(float(x), 4) for x in pour_axis],
         "length_mm": round(length, 2),
-        "inner_radius_mm": cfg.inner_radius,
-        "outer_radius_mm": cfg.outer_radius,
+        "inner_radius_mm": round(item.params["inner_radius"], 2),
+        "outer_radius_mm": round(item.params["outer_radius"], 2),
     }
     log.info("added pour spout at %s", np.round(entry_world, 1))
-    return half_a, half_b, info
+    return half_a, half_b, detail
 
 
 def _block_corners(local_bounds: np.ndarray) -> np.ndarray:
@@ -457,60 +724,57 @@ def find_air_traps(
     return picked
 
 
-def add_vents(
+def _apply_vent(
     half_a: trimesh.Trimesh,
     half_b: trimesh.Trimesh,
-    cavity: trimesh.Trimesh,
-    frame: Frame,
-    local_bounds: np.ndarray,
-    points: list[np.ndarray],
-    cfg: VentConfig,
+    ctx: FeatureContext,
+    item: FeatureItem,
 ) -> tuple[trimesh.Trimesh, trimesh.Trimesh, dict]:
-    """Drill a thin channel from each air trap out to the block's surface.
+    """Drill one thin channel from an air trap out to the block's surface.
 
     Routed along the pull direction, picking the side whose ray does not
     re-enter the cavity, so the channel is a straight run through mold material
     that releases along the direction the half already moves in.
     """
-    d = frame.direction
-    cut: list[dict] = []
+    d = ctx.direction
+    p = np.asarray(item.position, dtype=np.float64).reshape(3)
+    radius = item.params["radius"]
 
-    for p in points:
-        chosen_sign = None
-        for sign in (1.0, -1.0):
-            origin = (p + sign * d * 0.25).reshape(1, 3)
-            if not cavity.ray.intersects_any(origin, (sign * d).reshape(1, 3))[0]:
-                chosen_sign = sign
-                break
-        if chosen_sign is None:
-            log.info("skipping vent at %s: both routes re-enter the cavity", np.round(p, 1))
-            continue
+    chosen_sign = None
+    for sign in (1.0, -1.0):
+        origin = (p + sign * d * 0.25).reshape(1, 3)
+        if not ctx.cavity.ray.intersects_any(origin, (sign * d).reshape(1, 3))[0]:
+            chosen_sign = sign
+            break
+    if chosen_sign is None:
+        raise FeatureSkipped("both routes out re-enter the cavity")
 
-        pz = float(frame.to_local(p)[2])
-        if chosen_sign > 0:
-            length = float(local_bounds[1, 2]) - pz + 3.0
-        else:
-            length = pz - float(local_bounds[0, 2]) + 3.0
+    pz = float(ctx.frame.to_local(p)[2])
+    if chosen_sign > 0:
+        length = float(ctx.local_bounds[1, 2]) - pz + 3.0
+    else:
+        length = pz - float(ctx.local_bounds[0, 2]) + 3.0
+    if length <= 1.0:
+        raise FeatureSkipped("vent starts outside the block")
 
-        channel = frustum(cfg.radius, cfg.radius, length + 2.0, sections=20)
-        rot = trimesh.geometry.align_vectors([0.0, 0.0, 1.0], chosen_sign * d)
-        channel.apply_transform(rot)
-        channel.apply_translation(p - chosen_sign * d * 2.0)
+    channel = frustum(radius, radius, length + 2.0, sections=20)
+    rot = trimesh.geometry.align_vectors([0.0, 0.0, 1.0], chosen_sign * d)
+    channel.apply_transform(rot)
+    channel.apply_translation(p - chosen_sign * d * 2.0)
 
-        half_a = _difference(half_a, channel, "vent -> A")
-        half_b = _difference(half_b, channel, "vent -> B")
-        cut.append(
-            {
-                "point_world": [round(float(x), 2) for x in p],
-                "along": "+d" if chosen_sign > 0 else "-d",
-                "length_mm": round(length, 2),
-            }
-        )
-
-    log.info("added %d vents", len(cut))
-    return half_a, half_b, {"count": len(cut), "radius_mm": cfg.radius, "vents": cut}
+    half_a = _difference(half_a, channel, "vent -> A")
+    half_b = _difference(half_b, channel, "vent -> B")
+    return half_a, half_b, {
+        "id": item.id,
+        "point_world": [round(float(x), 2) for x in p],
+        "along": "+d" if chosen_sign > 0 else "-d",
+        "length_mm": round(length, 2),
+        "radius_mm": round(radius, 2),
+    }
 
 
+# --------------------------------------------------------------------------
+# planning and applying
 # --------------------------------------------------------------------------
 
 
@@ -520,6 +784,9 @@ class FeatureReport:
     spout: dict = field(default_factory=dict)
     vents: dict = field(default_factory=dict)
     pour_axis: list[float] = field(default_factory=list)
+    # One entry per planned item, applied or not, so a caller can tell the
+    # difference between "you switched it off" and "it would not fit".
+    items: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -527,7 +794,159 @@ class FeatureReport:
             "keys": self.keys,
             "spout": self.spout,
             "vents": self.vents,
+            "items": self.items,
         }
+
+    def skipped(self) -> list[dict]:
+        return [i for i in self.items if i["status"] == "skipped"]
+
+
+def plan_features(
+    ctx: FeatureContext, cfg: MoldConfig | None = None
+) -> FeaturePlan:
+    """Propose where the knobs and holes go. Cheap: no booleans, no geometry.
+
+    This is the automatic pass. Everything it decides is expressed as plain
+    data, so it can be shown, edited and re-applied rather than only obeyed.
+    """
+    cfg = cfg or MoldConfig()
+    pour_axis = choose_pour_axis(ctx.cavity, cfg)
+    items: list[FeatureItem] = []
+
+    if cfg.keys.enabled:
+        for n, site in enumerate(find_key_sites(ctx, cfg.keys), start=1):
+            items.append(
+                FeatureItem(
+                    id=f"key-{n}",
+                    kind="key",
+                    position=[
+                        float(v)
+                        for v in ctx.frame.to_world(np.array([site.x, site.y, site.z]))
+                    ],
+                    params=_defaults_for("key", cfg),
+                    note=f"{site.clearance_to_cavity:.1f} mm clear of the cavity",
+                )
+            )
+
+    spout_world = None
+    if cfg.spout.enabled:
+        spout_world = spout_entry(ctx.cavity, ctx, pour_axis)
+        items.append(
+            FeatureItem(
+                id="spout-1",
+                kind="spout",
+                position=[float(v) for v in spout_world],
+                params=_defaults_for("spout", cfg),
+                note="cavity high point along the pour axis",
+            )
+        )
+
+    if cfg.vents.enabled:
+        traps = find_air_traps(
+            ctx.cavity, pour_axis, cfg.vents, spout_world=spout_world
+        )
+        for n, point in enumerate(traps, start=1):
+            items.append(
+                FeatureItem(
+                    id=f"vent-{n}",
+                    kind="vent",
+                    position=[float(v) for v in point],
+                    params=_defaults_for("vent", cfg),
+                    note="trapped-air pocket",
+                )
+            )
+
+    plan = FeaturePlan(items=items, pour_axis=[float(v) for v in pour_axis])
+    log.info(
+        "planned %d feature(s): %s",
+        len(items),
+        {k: len(plan.of_kind(k)) for k in KINDS},
+    )
+    return plan.normalised(cfg)
+
+
+def _aggregate(report: FeatureReport, plan: FeaturePlan, details: dict[str, list[dict]]) -> None:
+    """Fill the per-kind summaries the report has always carried."""
+    if plan.of_kind("key"):
+        sites = details["key"]
+        report.keys = {
+            "count": len(sites),
+            "radius_mm": max((s["radius_mm"] for s in sites), default=0.0),
+            "height_mm": max((s["height_mm"] for s in sites), default=0.0),
+            "sites": sites,
+        }
+    if plan.of_kind("spout"):
+        spouts = details["spout"]
+        report.spout = dict(spouts[0]) if spouts else {"count": 0}
+        if len(spouts) > 1:
+            report.spout["extra"] = spouts[1:]
+    if plan.of_kind("vent"):
+        vents = details["vent"]
+        report.vents = {
+            "count": len(vents),
+            "radius_mm": max((v["radius_mm"] for v in vents), default=0.0),
+            "vents": vents,
+        }
+
+
+def apply_plan(
+    half_a: trimesh.Trimesh,
+    half_b: trimesh.Trimesh,
+    ctx: FeatureContext,
+    plan: FeaturePlan | dict,
+    *,
+    cfg: MoldConfig | None = None,
+    progress=None,
+) -> tuple[trimesh.Trimesh, trimesh.Trimesh, FeatureReport]:
+    """Cut a plan into a pair of base halves.
+
+    Items that cannot be placed are reported and skipped, never fatal: one knob
+    landing over the cavity is not a reason to throw away a mold that took a
+    minute to build.
+
+    ``progress`` is called with a fraction of *this* step, 0 to 1; the caller
+    decides where that sits in its own run.
+    """
+    report_progress = progress or (lambda *a, **k: None)
+    plan = FeaturePlan.from_dict(plan).normalised(cfg)
+    pour_axis = unit(plan.pour_axis)
+
+    out = FeatureReport(pour_axis=[round(float(v), 4) for v in pour_axis])
+    details: dict[str, list[dict]] = {k: [] for k in KINDS}
+    todo = plan.enabled_items()
+    by_id = {item.id: item for item in todo}
+
+    for n, item in enumerate(todo):
+        report_progress(n / max(1, len(todo)), f"cutting {item.kind} {n + 1}/{len(todo)}")
+        entry = item.as_dict()
+        try:
+            if item.kind == "key":
+                half_a, half_b, detail = _apply_key(half_a, half_b, ctx, item)
+            elif item.kind == "spout":
+                half_a, half_b, detail = _apply_spout(
+                    half_a, half_b, ctx, item, pour_axis
+                )
+            else:
+                half_a, half_b, detail = _apply_vent(half_a, half_b, ctx, item)
+        except FeatureSkipped as exc:
+            log.info("skipping %s %s: %s", item.kind, item.id, exc)
+            entry.update(status="skipped", reason=str(exc))
+        else:
+            details[item.kind].append(detail)
+            entry.update(status="applied", reason="", detail=detail)
+        out.items.append(entry)
+
+    for item in plan.items:
+        if item.id not in by_id:
+            out.items.append({**item.as_dict(), "status": "off", "reason": ""})
+
+    _aggregate(out, plan, details)
+    log.info(
+        "applied %d/%d feature(s)",
+        sum(1 for i in out.items if i["status"] == "applied"),
+        len(plan.items),
+    )
+    return half_a, half_b, out
 
 
 def apply_features(
@@ -537,46 +956,9 @@ def apply_features(
     *,
     progress=None,
 ) -> tuple[trimesh.Trimesh, trimesh.Trimesh, FeatureReport]:
-    """Add keys, spout and vents to an already-split mold."""
-    report = progress or (lambda *a, **k: None)
-    half_a, half_b = result.half_a, result.half_b
-    out = FeatureReport()
-
-    pour_axis = choose_pour_axis(cavity, cfg)
-    out.pour_axis = [round(float(x), 4) for x in pour_axis]
-
-    if cfg.keys.enabled:
-        report(0.76, "adding alignment keys")
-        half_a, half_b, out.keys = add_keys(
-            half_a, half_b, result.surface, result.local_bounds, cfg.keys
-        )
-
-    spout_world = None
-    if cfg.spout.enabled:
-        report(0.84, "cutting pour spout")
-        half_a, half_b, out.spout = add_spout(
-            half_a,
-            half_b,
-            cavity,
-            result.surface,
-            result.local_bounds,
-            pour_axis,
-            cfg.spout,
-        )
-        if out.spout.get("entry_world"):
-            spout_world = np.array(out.spout["entry_world"], dtype=np.float64)
-
-    if cfg.vents.enabled:
-        report(0.9, "cutting vents")
-        traps = find_air_traps(cavity, pour_axis, cfg.vents, spout_world=spout_world)
-        half_a, half_b, out.vents = add_vents(
-            half_a,
-            half_b,
-            cavity,
-            result.frame,
-            result.local_bounds,
-            traps,
-            cfg.vents,
-        )
-
-    return half_a, half_b, out
+    """Plan and cut features in one go: the fully automatic path."""
+    ctx = FeatureContext.from_mold(result, cavity)
+    plan = plan_features(ctx, cfg)
+    return apply_plan(
+        result.half_a, result.half_b, ctx, plan, cfg=cfg, progress=progress
+    )

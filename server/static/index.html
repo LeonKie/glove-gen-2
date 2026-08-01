@@ -70,17 +70,35 @@
         <input type="range" id="grid" min="120" max="700" step="20" value="400">
       </div>
       <div class="row checks">
-        <label><input type="checkbox" id="opt-keys" checked> Alignment keys</label>
-        <label><input type="checkbox" id="opt-spout" checked> Pour spout</label>
-        <label><input type="checkbox" id="opt-vents" checked> Vents</label>
+        <label><input type="checkbox" id="opt-keys" checked> Propose alignment keys</label>
+        <label><input type="checkbox" id="opt-spout" checked> Propose pour spout</label>
+        <label><input type="checkbox" id="opt-vents" checked> Propose vents</label>
       </div>
       <button class="primary big" id="btn-build">Build mold</button>
       <div id="build-status" class="status" hidden></div>
       <div id="build-progress" class="progress" hidden><div class="bar"></div></div>
     </section>
 
+    <section class="panel" id="panel-features" hidden>
+      <h2>4 · Knobs &amp; holes</h2>
+      <p class="hint">
+        Placed automatically. Resize, switch off, or add your own — then
+        re-apply. Only the features are re-cut, not the mold.
+      </p>
+      <div class="btn-row">
+        <button id="btn-add-key">+ Knob</button>
+        <button id="btn-add-spout">+ Spout</button>
+        <button id="btn-add-vent">+ Vent</button>
+        <button id="btn-plan-reset">Reset</button>
+      </div>
+      <div id="feature-list"></div>
+      <button class="primary big" id="btn-apply-features">Re-apply features</button>
+      <div id="features-status" class="status" hidden></div>
+      <div id="features-progress" class="progress" hidden><div class="bar"></div></div>
+    </section>
+
     <section class="panel" id="panel-result" hidden>
-      <h2>4 · Result</h2>
+      <h2>5 · Result</h2>
       <dl id="result-stats" class="stats"></dl>
       <div id="downloads"></div>
     </section>
@@ -105,6 +123,7 @@
       <span class="swatch bad"></span> trapped
     </div>
     <div id="hud"></div>
+    <div id="place-hint" hidden></div>
     <div id="jobs-drawer" hidden><h3>History</h3><div id="jobs-list"></div></div>
   </main>
 

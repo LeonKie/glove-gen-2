@@ -49,11 +49,15 @@ class MoldResult:
     frame: Frame
     block: trimesh.Trimesh
     mold: trimesh.Trimesh  # block with the cavity cut, before splitting
-    half_a: trimesh.Trimesh  # pulls along +direction
-    half_b: trimesh.Trimesh  # pulls along -direction
+    half_a: trimesh.Trimesh  # pulls along +direction, before features
+    half_b: trimesh.Trimesh  # pulls along -direction, before features
     surface: PartingSurface
     parting_solid: trimesh.Trimesh
     local_bounds: np.ndarray  # (2,3) block bounds in the pull frame
+    # What was actually subtracted from the block: the input part, unless an
+    # offset or a face budget changed it. Features are placed against *this*,
+    # not the original scan, since it is the surface they have to clear.
+    cavity: trimesh.Trimesh | None = None
     timings: dict = field(default_factory=dict)
     stats: dict = field(default_factory=dict)
 
@@ -232,6 +236,7 @@ def build_mold(
         surface=surface,
         parting_solid=parting_solid,
         local_bounds=local_bounds,
+        cavity=cavity,
         timings=timings,
         stats=stats,
     )

@@ -18,6 +18,11 @@ const el = {
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
   build: $('btn-build'), buildStatus: $('build-status'), buildProgress: $('build-progress'),
+  panelFeatures: $('panel-features'), featureList: $('feature-list'),
+  addKey: $('btn-add-key'), addSpout: $('btn-add-spout'), addVent: $('btn-add-vent'),
+  resetPlan: $('btn-plan-reset'),
+  applyFeatures: $('btn-apply-features'), featuresStatus: $('features-status'),
+  featuresProgress: $('features-progress'), placeHint: $('place-hint'),
   resultStats: $('result-stats'), downloads: $('downloads'),
   layers: $('layers'), legend: $('legend'), hud: $('hud'),
   jobsBtn: $('btn-jobs'), jobsDrawer: $('jobs-drawer'), jobsList: $('jobs-list'),
@@ -32,6 +37,15 @@ const state = {
   heatTimer: null,
   layer: 'part',
   lastReport: null,
+  // feature editing
+  plan: null,           // the plan being edited
+  autoPlan: null,       // what the mold job proposed, for "Reset"
+  sourceJobId: null,    // job currently on screen
+  featureStatus: {},    // item id -> { status, reason } from the last apply
+  placing: null,        // 'key' | 'vent' while picking a spot in the viewport
+  pullDirection: [0, 0, 1],
+  defaults: null,       // MoldConfig defaults, from /api/status
+  paramBounds: null,    // per-kind clamp ranges, from /api/status
 };
 
 /* ------------------------------------------------------------------ *
@@ -64,6 +78,10 @@ scene.add(fill);
 const layers = { part: null, half_a: null, half_b: null, parting: null };
 const gizmo = new THREE.Group();
 scene.add(gizmo);
+// Where the knobs and holes are, drawn over whichever layer is showing.
+const markers = new THREE.Group();
+scene.add(markers);
+const raycaster = new THREE.Raycaster();
 
 const NEUTRAL = new THREE.Color(0x9aa7b6);
 
@@ -142,6 +160,9 @@ function statsTable(node, rows) {
     .map(([k, v, cls = '']) => `<div><dt>${k}</dt><dd class="${cls}">${v}</dd></div>`)
     .join('');
 }
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /* ------------------------------------------------------------------ *
  * upload
@@ -227,6 +248,7 @@ async function selectMesh(meshId) {
   el.panelDir.classList.remove('disabled');
   el.panelMold.classList.remove('disabled');
   el.panelResult.hidden = true;
+  clearPlan();
   requestHeatmap();
 }
 
@@ -388,6 +410,309 @@ function showUndercutStats(s) {
 }
 
 /* ------------------------------------------------------------------ *
+ * feature plan — interactive, once the mold exists
+ *
+ * The mold job proposes every knob and hole automatically and returns that
+ * proposal as data. Editing it here and re-applying only re-cuts the
+ * features: the direction search, the parting surface and the split are
+ * already done and none of them depend on where a knob sits.
+ * ------------------------------------------------------------------ */
+
+// Labels and steps for the sizes a feature exposes. The ranges are replaced
+// by the server's on boot (and enforced there regardless) — see
+// glovegen.features.PARAM_BOUNDS.
+const PARAM_UI = {
+  key: [
+    ['radius', 'r', 0.5, 50, 0.5],
+    ['height', 'h', 0.5, 50, 0.5],
+    ['draft_deg', 'draft°', 0, 45, 1],
+    ['clearance', 'fit', 0, 3, 0.05],
+  ],
+  spout: [
+    ['inner_radius', 'inner r', 0.5, 60, 0.5],
+    ['outer_radius', 'outer r', 0.5, 80, 0.5],
+  ],
+  vent: [['radius', 'r', 0.2, 20, 0.1]],
+};
+const KIND_LABEL = { key: 'Knob', spout: 'Spout', vent: 'Vent' };
+const KIND_COLOUR = { key: 0x52a8ff, spout: 0x46b07a, vent: 0xe0a23c };
+
+function adoptParamBounds(bounds) {
+  for (const [kind, params] of Object.entries(bounds || {})) {
+    for (const spec of PARAM_UI[kind] || []) {
+      const range = params[spec[0]];
+      if (Array.isArray(range)) { [spec[2], spec[3]] = range; }
+    }
+  }
+}
+
+function defaultParams(kind) {
+  const d = state.defaults || {};
+  const k = d.keys || {}, s = d.spout || {}, v = d.vents || {};
+  if (kind === 'key') {
+    return {
+      radius: k.radius ?? 5, height: k.height ?? 4,
+      draft_deg: k.draft_deg ?? 20, clearance: k.clearance ?? 0.25,
+    };
+  }
+  if (kind === 'spout') {
+    return { inner_radius: s.inner_radius ?? 4, outer_radius: s.outer_radius ?? 9 };
+  }
+  return { radius: v.radius ?? 0.9 };
+}
+
+function clonePlan(plan) {
+  return plan ? JSON.parse(JSON.stringify(plan)) : null;
+}
+
+function setPlan(plan, { statuses = null } = {}) {
+  state.plan = clonePlan(plan);
+  state.featureStatus = statuses || {};
+  renderPlan();
+}
+
+function clearPlan() {
+  state.plan = null;
+  state.autoPlan = null;
+  state.sourceJobId = null;
+  state.featureStatus = {};
+  setPlacing(null);
+  el.panelFeatures.hidden = true;
+  el.featuresStatus.hidden = true;
+  drawMarkers();
+}
+
+function planDirty(message) {
+  say(el.featuresStatus, message || 'edited — re-apply to cut this into the mold');
+}
+
+function renderPlan() {
+  const plan = state.plan;
+  el.panelFeatures.hidden = !plan;
+  if (!plan) { drawMarkers(); return; }
+
+  const seen = {};
+  el.featureList.innerHTML = plan.items.length
+    ? plan.items.map((item) => {
+      seen[item.kind] = (seen[item.kind] || 0) + 1;
+      const st = state.featureStatus[item.id] || {};
+      const skipped = st.status === 'skipped';
+      const params = (PARAM_UI[item.kind] || []).map(([name, label, min, max, step]) =>
+        `<label>${label}<input type="number" data-id="${esc(item.id)}" data-param="${name}"
+           value="${item.params[name]}" min="${min}" max="${max}" step="${step}"></label>`).join('');
+      return `
+        <div class="feat${item.enabled ? '' : ' off'}${skipped ? ' skipped' : ''}">
+          <div class="feat-head">
+            <input type="checkbox" data-toggle="${esc(item.id)}" ${item.enabled ? 'checked' : ''}>
+            <span class="dot ${item.kind}"></span>
+            <span class="name">${KIND_LABEL[item.kind]} ${seen[item.kind]}</span>
+            <span class="note">${esc(item.source === 'user' ? 'placed by hand' : item.note)}</span>
+            <button class="del" data-del="${esc(item.id)}" title="remove">✕</button>
+          </div>
+          <div class="feat-params">${params}</div>
+          ${skipped ? `<div class="feat-why">skipped — ${esc(st.reason)}</div>` : ''}
+        </div>`;
+    }).join('')
+    : '<p class="empty">Nothing planned. Add a knob or a vent to place one by hand.</p>';
+
+  drawMarkers();
+}
+
+function itemById(id) {
+  return (state.plan?.items || []).find((i) => i.id === id);
+}
+
+el.featureList.addEventListener('input', (e) => {
+  const t = e.target;
+  if (!t.dataset.param) return;
+  const item = itemById(t.dataset.id);
+  const value = Number(t.value);
+  if (!item || !Number.isFinite(value)) return;
+  // Deliberately no re-render: that would yank focus out of the field being
+  // typed into. The markers are the live feedback.
+  item.params[t.dataset.param] = value;
+  drawMarkers();
+  planDirty();
+});
+
+el.featureList.addEventListener('change', (e) => {
+  const id = e.target.dataset.toggle;
+  if (!id) return;
+  const item = itemById(id);
+  if (!item) return;
+  item.enabled = e.target.checked;
+  renderPlan();
+  planDirty();
+});
+
+el.featureList.addEventListener('click', (e) => {
+  const id = e.target.dataset.del;
+  if (!id) return;
+  state.plan.items = state.plan.items.filter((i) => i.id !== id);
+  renderPlan();
+  planDirty();
+});
+
+/* ---- placing a feature by clicking in the viewport ---- */
+
+// Knobs and spouts are both centred on the parting surface, so they are placed
+// against it; a vent starts at the cast, so it is placed against the scan.
+const PLACE_ON = { key: 'parting', spout: 'parting', vent: 'part' };
+const PLACE_HINT = {
+  key: 'Click the parting surface to drop a knob · Esc to cancel',
+  spout: 'Click the parting surface where the mold should be filled · Esc to cancel',
+  vent: 'Click the scan where air would be trapped · Esc to cancel',
+};
+
+function setPlacing(kind) {
+  state.placing = kind;
+  el.placeHint.hidden = !kind;
+  for (const [k, button] of [['key', el.addKey], ['spout', el.addSpout], ['vent', el.addVent]]) {
+    button.classList.toggle('active', kind === k);
+  }
+  if (!kind) return;
+  el.placeHint.textContent = PLACE_HINT[kind];
+  const layer = PLACE_ON[kind];
+  if (layers[layer]) showLayer(layer);
+}
+
+function addItem(kind, point) {
+  state.uid = (state.uid || 0) + 1;
+  state.plan.items.push({
+    id: `${kind}-u${state.uid}`,
+    kind,
+    enabled: true,
+    source: 'user',
+    position: [point.x, point.y, point.z],
+    params: defaultParams(kind),
+    note: 'placed by hand',
+  });
+  renderPlan();
+  planDirty(`${KIND_LABEL[kind].toLowerCase()} placed — re-apply to cut it`);
+}
+
+let pressedAt = null;
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  pressedAt = [e.clientX, e.clientY];
+});
+renderer.domElement.addEventListener('pointerup', (e) => {
+  const from = pressedAt;
+  pressedAt = null;
+  if (!state.placing || !from) return;
+  // An orbit ends in a pointerup too; only a press that barely moved is a click.
+  if (Math.hypot(e.clientX - from[0], e.clientY - from[1]) > 4) return;
+
+  const target = layers[PLACE_ON[state.placing]];
+  if (!target) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  raycaster.setFromCamera(new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1,
+  ), camera);
+  const hit = raycaster.intersectObject(target, false)[0];
+  if (!hit) {
+    say(el.featuresStatus, 'nothing there — click on the surface itself', 'err');
+    return;
+  }
+  addItem(state.placing, hit.point);
+  setPlacing(null);
+});
+
+addEventListener('keydown', (e) => { if (e.key === 'Escape') setPlacing(null); });
+
+/* ---- markers ---- */
+
+function drawMarkers() {
+  for (const m of markers.children) { m.geometry.dispose(); m.material.dispose(); }
+  markers.clear();
+  if (!state.plan) return;
+
+  const pull = new THREE.Vector3(...state.pullDirection).normalize();
+  const pour = new THREE.Vector3(...(state.plan.pour_axis || [0, 0, 1])).normalize();
+  const up = new THREE.Vector3(0, 1, 0);
+
+  for (const item of state.plan.items) {
+    const st = state.featureStatus[item.id] || {};
+    const p = item.params;
+    let geom, axis = pull;
+    if (item.kind === 'key') {
+      geom = new THREE.CylinderGeometry(p.radius, p.radius, Math.max(p.height, 1), 20);
+    } else if (item.kind === 'spout') {
+      geom = new THREE.ConeGeometry(p.outer_radius, p.outer_radius * 2.2, 24);
+      axis = pour;
+    } else {
+      geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 14, 10);
+    }
+    const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
+      color: st.status === 'skipped' ? 0xe05c4b : KIND_COLOUR[item.kind],
+      transparent: true,
+      opacity: item.enabled ? 0.55 : 0.15,
+      depthWrite: false,
+    }));
+    mesh.quaternion.setFromUnitVectors(up, axis);
+    mesh.position.set(...item.position);
+    markers.add(mesh);
+  }
+}
+
+/* ---- buttons ---- */
+
+el.addKey.onclick = () => setPlacing(state.placing === 'key' ? null : 'key');
+el.addSpout.onclick = () => setPlacing(state.placing === 'spout' ? null : 'spout');
+el.addVent.onclick = () => setPlacing(state.placing === 'vent' ? null : 'vent');
+el.resetPlan.onclick = () => {
+  if (!state.autoPlan) return;
+  setPlan(state.autoPlan);
+  planDirty('back to the automatic proposal — re-apply to cut it');
+};
+
+el.applyFeatures.onclick = async () => {
+  if (!state.plan || !state.sourceJobId) return;
+  setPlacing(null);
+  el.applyFeatures.disabled = true;
+  el.featuresProgress.hidden = false;
+  el.featuresProgress.querySelector('.bar').style.width = '0%';
+  say(el.featuresStatus, 'starting…');
+  try {
+    const { job } = await api('/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        kind: 'features',
+        config: { source_job: state.sourceJobId, plan: state.plan },
+      }),
+    });
+    pollJob(job.id, {
+      onProgress: (j) => {
+        say(el.featuresStatus, j.message);
+        el.featuresProgress.querySelector('.bar').style.width = `${Math.round(j.progress * 100)}%`;
+      },
+      onDone: async (j) => {
+        el.applyFeatures.disabled = false;
+        el.featuresProgress.querySelector('.bar').style.width = '100%';
+        await showResult(j);
+        const skipped = (j.result.report.features.items || [])
+          .filter((i) => i.status === 'skipped');
+        if (skipped.length) {
+          say(el.featuresStatus, `${skipped.length} could not be placed — see below`, 'err');
+        } else {
+          say(el.featuresStatus, 'features re-cut', 'ok');
+        }
+      },
+      onFail: (msg) => {
+        el.applyFeatures.disabled = false;
+        el.featuresProgress.hidden = true;
+        say(el.featuresStatus, msg, 'err');
+      },
+    });
+  } catch (err) {
+    el.applyFeatures.disabled = false;
+    el.featuresProgress.hidden = true;
+    say(el.featuresStatus, err.message, 'err');
+  }
+};
+
+/* ------------------------------------------------------------------ *
  * jobs
  * ------------------------------------------------------------------ */
 
@@ -459,7 +784,10 @@ el.build.onclick = async () => {
   el.panelResult.hidden = true;
   el.buildProgress.hidden = false;
   el.buildProgress.querySelector('.bar').style.width = '0%';
+  // The plan on screen belongs to the previous mold; this build proposes a new one.
+  clearPlan();
   const d = currentDirection();
+  state.pullDirection = [d.x, d.y, d.z];
   say(el.buildStatus, 'starting…');
   try {
     const { job } = await api('/api/jobs', {
@@ -500,10 +828,23 @@ async function showResult(job) {
   state.lastReport = r;
   const sep = r.separation || {};
   const feat = r.features || {};
-  statsTable(el.resultStats, [
+
+  // The knobs and holes become editable from here on: this job cached the
+  // halves as they came out of the split, so re-cutting them is cheap.
+  state.sourceJobId = job.id;
+  if (r.pull_direction) state.pullDirection = r.pull_direction;
+  const statuses = {};
+  for (const item of feat.items || []) {
+    statuses[item.id] = { status: item.status, reason: item.reason || '' };
+  }
+  if (job.result.plan) {
+    if (job.kind === 'mold' || !state.autoPlan) state.autoPlan = job.result.plan;
+    setPlan(job.result.plan, { statuses });
+  }
+
+  const rows = [
     ['half A', `${r.mold.half_a_volume_cm3.toFixed(0)} cm³`],
     ['half B', `${r.mold.half_b_volume_cm3.toFixed(0)} cm³`],
-    ['split error', `${r.mold.split_volume_error_cm3.toFixed(5)} cm³`],
     ['halves open', sep.opens ? 'yes' : 'NO', sep.opens ? 'ok' : 'bad'],
     ['cast interference', `${(sep.cast_interference_mm3 ?? 0).toFixed(2)} mm³`,
       sep.rigid_cast_demolds ? 'ok' : 'warn'],
@@ -512,7 +853,13 @@ async function showResult(job) {
     ['keys', feat.keys?.count ?? 0],
     ['spout', feat.spout?.length_mm ? `${feat.spout.length_mm.toFixed(0)} mm` : 'none'],
     ['vents', feat.vents?.count ?? 0],
-  ]);
+  ];
+  if (job.kind === 'mold') {
+    rows.splice(2, 0, ['split error', `${r.mold.split_volume_error_cm3.toFixed(5)} cm³`]);
+  }
+  const skipped = (feat.items || []).filter((i) => i.status === 'skipped').length;
+  if (skipped) rows.push(['not placed', skipped, 'bad']);
+  statsTable(el.resultStats, rows);
 
   el.downloads.innerHTML = Object.entries(job.parts || {})
     .map(([name, meta]) =>
@@ -523,8 +870,9 @@ async function showResult(job) {
 
   for (const which of ['half_a', 'half_b', 'parting']) {
     try {
-      const buf = await (await fetch(`/api/jobs/${job.id}/preview/${which}.bin`)).arrayBuffer();
-      setLayer(which, buildGeometry(decodeGGM2(buf)),
+      const res = await fetch(`/api/jobs/${job.id}/preview/${which}.bin`);
+      if (!res.ok) throw new Error(res.statusText);
+      setLayer(which, buildGeometry(decodeGGM2(await res.arrayBuffer())),
         which === 'parting' ? { transparent: true, opacity: 0.85 } : {});
       el.layers.querySelector(`[data-layer="${which}"]`).disabled = false;
     } catch { /* preview is optional */ }
@@ -545,7 +893,7 @@ el.jobsBtn.onclick = async () => {
         <div class="job-row">
           <span class="k">${j.kind}</span>
           <span class="s ${j.state}">${j.state}</span>
-          ${j.kind === 'mold' && j.state === 'done'
+          ${(j.kind === 'mold' || j.kind === 'features') && j.state === 'done'
             ? `<button data-load="${j.id}">load</button>` : '<span></span>'}
         </div>`).join('')
     : '<p class="hint">nothing yet</p>';
@@ -596,6 +944,8 @@ el.layers.querySelectorAll('button').forEach((b) => {
   buildGizmo(null);
   try {
     const s = await api('/api/status');
+    state.defaults = s.defaults;
+    adoptParamBounds(s.feature_params);
     el.storeUsage.textContent =
       `${s.storage.meshes} mesh · ${(s.storage.bytes / 1e6).toFixed(0)} MB · ttl ${s.storage.ttl_hours}h`;
   } catch { /* status is cosmetic */ }
