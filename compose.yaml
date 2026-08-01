@@ -1,0 +1,21 @@
+services:
+  glovegen:
+    build: .
+    image: glovegen:2.0.0
+    # Reap the spawned worker processes; uvicorn is PID 1 otherwise.
+    init: true
+    ports:
+      # Host side only; PORT moves the container's own listener.
+      - "${GLOVEGEN_PORT:-8111}:8111"
+    environment:
+      GLOVEGEN_STORE: /data/store
+      GLOVEGEN_TTL_HOURS: "24"
+      GLOVEGEN_MAX_UPLOAD_MB: "400"
+      # A full-resolution run peaks near 4 GB. Raise only with the RAM to match.
+      GLOVEGEN_WORKERS: "1"
+    volumes:
+      - glovegen-data:/data
+    restart: unless-stopped
+
+volumes:
+  glovegen-data:

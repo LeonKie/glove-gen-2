@@ -25,6 +25,15 @@ glovegen mold data/samples/Hand_Child.stl -o out/
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
+No local Python at all, just a clone and Docker:
+
+```bash
+docker compose up --build        # then open http://127.0.0.1:8111
+```
+
+See [Deployment](#deployment) for Fly.io and for running the CLI in the
+container.
+
 ---
 
 ## How it works
@@ -227,10 +236,82 @@ server/
 tests/              130 tests, ~6 s
 ```
 
+## Deployment
+
+```
+Dockerfile             python:3.12-slim, two stages, ~460 MB, runs as uid 10001
+docker-entrypoint.sh   chowns the store on a fresh volume, then drops privileges
+compose.yaml           local: named volume at /data, host port 8111
+fly.toml               Fly.io: one machine, 8 GB, volume at /data
+```
+
+Everything mutable lives under `/data` (`GLOVEGEN_STORE=/data/store`). Mount a
+volume there or uploads and molds die with the container — the store *is* the
+database.
+
+### Local
+
+```bash
+docker compose up --build              # http://127.0.0.1:8111
+GLOVEGEN_PORT=9000 docker compose up   # if 8111 is taken
+docker compose down                    # keeps the volume
+docker compose down -v                 # deletes uploads and molds too
+```
+
+`GLOVEGEN_PORT` remaps the host side. The container's own listener is `PORT`
+(8111 everywhere: image, compose, Fly).
+
+The CLI ships in the same image. Bind-mount the scans you want to work on, and
+run as yourself so the mold lands owned by you rather than by uid 10001:
+
+```bash
+docker compose run --rm -u "$(id -u):$(id -g)" -v "$PWD/data:/work" glovegen \
+    glovegen mold /work/samples/Hand_Child.stl -o /work/out
+```
+
+### Fly.io
+
+```bash
+fly launch --no-deploy                                   # rewrites `app`
+fly volumes create glovegen_data --region fra --size 20  # GB; ~15 MB per mold
+fly deploy
+```
+
+The defaults in `fly.toml` are a deliberate fit to how this thing runs:
+
+- **8 GB, 2 dedicated cores.** A full-resolution run peaks near 4 GB and pins a
+  core for a minute; shared-CPU machines get throttled mid-boolean.
+- **One machine, `GLOVEGEN_WORKERS=1`.** Concurrent full-resolution jobs would
+  multiply the 4 GB peak, and only one machine can hold the volume. Scaling out
+  means one volume per machine and a store that no longer shares state.
+- **`auto_stop_machines = "suspend"`.** Suspend freezes the machine rather than
+  killing it, so a job still running when the last browser tab disconnects
+  resumes instead of coming back `interrupted`. Set it to `"off"` if jobs are
+  routinely left unattended for long stretches.
+- **Uploads up to 400 MB** (`GLOVEGEN_MAX_UPLOAD_MB`) are buffered in memory by
+  the request handler, so the ceiling is another reason for the 8 GB.
+
+A restart is safe by construction: `store.reap_orphans()` marks jobs whose
+worker is gone as `interrupted` instead of leaving a spinner that never stops.
+
+### Anywhere else
+
+The image needs no build tooling, no GPU and no system packages beyond the base:
+
+```bash
+docker build -t glovegen .
+docker run -d --init -p 8111:8111 -v glovegen-data:/data glovegen
+```
+
+`PORT` picks the listening port. Run exactly one uvicorn process — never
+`--workers` — the app owns a worker pool and an in-process mesh cache, and a
+second copy of either doubles the memory peak.
+
 ## Configuration
 
-Environment: `GLOVEGEN_STORE` (default `data/store`), `GLOVEGEN_TTL_HOURS` (24),
-`GLOVEGEN_MAX_UPLOAD_MB` (400), `GLOVEGEN_WORKERS` (1).
+Environment: `GLOVEGEN_STORE` (default `data/store`, `/data/store` in the
+image), `GLOVEGEN_TTL_HOURS` (24), `GLOVEGEN_MAX_UPLOAD_MB` (400),
+`GLOVEGEN_WORKERS` (1).
 
 Everything geometric lives in `glovegen/config.py` as dataclasses and is
 accepted as a partial nested dict by the API, so
