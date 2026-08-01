@@ -1,0 +1,57 @@
+# fly.toml — `fly launch --no-deploy` will rewrite `app`; then `fly deploy`.
+# The volume has to exist first:
+#   fly volumes create glovegen_data --region fra --size 20
+
+app = "glovegen"
+primary_region = "fra"
+
+[build]
+
+[env]
+  GLOVEGEN_STORE = "/data/store"
+  GLOVEGEN_TTL_HOURS = "24"
+  GLOVEGEN_MAX_UPLOAD_MB = "400"
+  GLOVEGEN_WORKERS = "1"
+  PORT = "8111"
+
+# Uploads, meshes and finished molds all live here. Without it every deploy
+# starts empty — the store is the database.
+[[mounts]]
+  source = "glovegen_data"
+  destination = "/data"
+
+[http_service]
+  # Must match PORT above; Fly still serves the app on 80/443 publicly.
+  internal_port = 8111
+  force_https = true
+  auto_start_machines = true
+  # "suspend" freezes the machine instead of killing it, so a mold job that is
+  # still running when the last browser disconnects resumes rather than dies.
+  # Set to "off" if jobs are routinely left unattended.
+  auto_stop_machines = "suspend"
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/api/status"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  # 4 GB is the measured peak of one full-resolution run; 8 GB leaves room for
+  # the API process, the page cache and a concurrent upload. Dedicated cores,
+  # not shared: a mold job saturates a core for a minute and shared-CPU
+  # machines get throttled well before that.
+  memory = "8gb"
+  cpus = 2
+  cpu_kind = "performance"
+
+  # Volume-backed, so exactly one machine. Scaling out means one volume each.
+  processes = ["app"]
