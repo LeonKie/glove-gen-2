@@ -18,10 +18,17 @@ pip install -e .
 # analysis only: which way should the mold pull?
 glovegen analyze data/samples/Hand_Child.stl --heatmap heat.ply
 
-# build the mold
+# build the mold: keys, pour spout and vents are chosen and cut automatically
 glovegen mold data/samples/Hand_Child.stl -o out/
 
-# or use the web app
+# same, with bigger knobs and a wider spout
+glovegen mold data/samples/Hand_Child.stl -o out/ --key-radius 7 --spout-outer 12
+
+# or hand it the plan from a previous run, edited
+glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
+
+# or use the web app, where the knobs and holes become editable once the
+# mold is built, and re-applying them does not rebuild it
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -140,6 +147,9 @@ pull direction, where they release by construction. Never in between.
   not its resting shape: the parting surface is curved, so half B can hold
   material above the key's mouth within the key's own footprint, and without
   sweeping, the key jams on it.
+
+  Every size is per key, not per mold: `radius`, `height`, `draft_deg` and the
+  socket `clearance`.
 - **Pour spout** — a funnel into the cavity's extreme along the pour axis,
   centred on the parting surface. The pour axis defaults to the part's longest
   principal axis oriented **fat-end-up**; on the hand scan that correctly puts
@@ -150,7 +160,48 @@ pull direction, where they release by construction. Never in between.
   axis, one per connected pocket (a flat ceiling is one pocket however many cells
   it spans). Each is routed along whichever of `±d` does not re-enter the cavity.
 
-### 5. Verification
+### 5. Choosing the features, and changing your mind
+
+Deciding *where* the knobs and holes go is separated from cutting them. The
+automatic pass emits a **feature plan** — a flat, serialisable list of items,
+each with a world position and its own sizes:
+
+```json
+{"id": "key-2", "kind": "key", "enabled": true, "source": "auto",
+ "position": [41.2, -8.7, 130.4],
+ "params": {"radius": 5.0, "height": 4.0, "draft_deg": 20.0, "clearance": 0.25},
+ "note": "8.4 mm clear of the cavity"}
+```
+
+Planning costs ray casts and a distance transform; *applying* costs one boolean
+per item on million-face halves. Keeping them apart is what lets the same code
+be hands-off in one place and interactive in another:
+
+- **The CLI is automatic.** `glovegen mold part.stl -o out/` plans and cuts in
+  one go — no prompts, no second command. `--key-radius`, `--vent-radius`,
+  `--spout-outer` and friends change the sizes it picks; `--plan plan.json`
+  replaces its choices outright. The plan a run used comes back in
+  `report.json` under `feature_plan`, so the edit loop is
+  `jq`, edit, re-run with `--plan`.
+- **The web app is interactive, after the mold exists.** The build returns its
+  proposal and every knob and hole becomes a row you can resize, switch off or
+  delete, with markers in the viewport that track the sizes as you type. New
+  ones are placed by clicking: knobs and spouts on the parting surface, vents
+  on the scan. "Re-apply" runs a `features` job.
+
+A re-apply does not rebuild the mold. The mold job caches the halves *as they
+came out of the split*, the parting surface and the block's bounds; nothing in
+that set depends on where a knob sits, so an edit pays for the features and the
+separation check only — on the hand scan, the 5.4 s and 10.7 s from the timing
+breakdown above, not the ~34 s before them. Editing an edit re-cuts from that
+same base, so booleans never stack.
+
+Placement is checked, not assumed. A knob dropped over the cavity, or a vent
+whose every route back out re-enters the cast, is reported as `skipped` with the
+reason and the rest of the plan is still cut — one bad hand-placed item is not a
+reason to throw away a mold that took a minute to build.
+
+### 6. Verification
 
 `validate.separation_report` measures rather than assumes, by sliding the halves
 and intersecting:
@@ -216,6 +267,9 @@ offset-shelling approach.
   and will not fit a 256 mm bed without manual splitting.
 - One mold job runs at a time by default (`GLOVEGEN_WORKERS`); a full-resolution
   run peaks near 4 GB.
+- A mold job caches its pre-feature halves so features can be re-cut without
+  rebuilding, which roughly doubles what a job costs on disk (~24 bytes per
+  triangle per half). They are purged with the job by the TTL.
 
 ## Layout
 
@@ -224,16 +278,16 @@ glovegen/
   demold.py         pull-direction search, per-face undercut heatmap
   parting.py        constrained height field -> parting surface + solid
   mold.py           block, block−part, the split
-  features.py       keys, pour spout, vents
-  pipeline.py       orchestration + reporting
+  features.py       the feature plan: choosing keys/spout/vents, and cutting them
+  pipeline.py       orchestration + reporting, and re-cutting an edited plan
   validate.py       solid gating, separation measurement
   cli.py            glovegen analyze | mold
 server/
   app.py            FastAPI: upload, heatmap, jobs, downloads
   store.py          disk-backed persistence, TTL, orphan reaping
-  worker.py         job bodies, run out-of-process
-  static/           three.js viewer with live heatmap
-tests/              130 tests, ~6 s
+  worker.py         job bodies (prepare | analyze | mold | features), out-of-process
+  static/           three.js viewer: live heatmap, then the editable feature plan
+tests/              159 tests
 ```
 
 ## Deployment
@@ -316,3 +370,14 @@ image), `GLOVEGEN_TTL_HOURS` (24), `GLOVEGEN_MAX_UPLOAD_MB` (400),
 Everything geometric lives in `glovegen/config.py` as dataclasses and is
 accepted as a partial nested dict by the API, so
 `{"block_margin": 12, "parting": {"grid": 500}}` is a valid job config.
+
+Feature sizes are per item rather than per mold, so they live in the plan, not
+in the config — the config's `keys.radius`, `spout.outer_radius` and
+`vents.radius` are the *defaults the automatic pass starts from*. Whatever a
+client sends is clamped to `features.PARAM_BOUNDS` (also served from
+`/api/status` as `feature_params`), which keeps a stray unit or a typo'd zero
+from turning into a boolean that runs for minutes and returns garbage.
+
+The job kinds are `prepare`, `analyze`, `mold` and `features`; a `features` job
+takes `{"source_job": "<id>", "plan": {...}}` and re-cuts the plan into the
+source's cached base halves.

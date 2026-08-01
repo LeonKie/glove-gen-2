@@ -1,4 +1,4 @@
-"""Keys, pour spout and vents."""
+"""Keys, pour spout and vents: choosing them, and cutting them."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import pytest
 
 from glovegen import features, mold, validate
 from glovegen.config import MoldConfig, VentConfig
+from glovegen.features import FeatureItem, FeaturePlan
 
 
 def frustum_volume(r0: float, r1: float, h: float) -> float:
@@ -94,6 +95,63 @@ class TestAirTraps:
         assert len(traps) <= 2
 
 
+class TestFeaturePlan:
+    """The plan is data: it survives a round trip and refuses nonsense."""
+
+    def test_round_trips_through_a_dict(self):
+        plan = FeaturePlan(
+            items=[
+                FeatureItem(kind="key", position=[1, 2, 3], params={"radius": 6.0}),
+                FeatureItem(kind="vent", position=[4, 5, 6], enabled=False),
+            ],
+            pour_axis=[0, 0, 1],
+        ).normalised()
+        again = FeaturePlan.from_dict(plan.as_dict()).normalised()
+        assert again.as_dict() == plan.as_dict()
+        assert [i.id for i in again.items] == ["key-1", "vent-2"]
+
+    def test_missing_sizes_fall_back_to_the_config(self):
+        cfg = MoldConfig()
+        cfg.keys.radius = 7.5
+        item = FeatureItem(kind="key", position=[0, 0, 0]).normalised(cfg)
+        assert item.params["radius"] == 7.5
+        assert item.params["draft_deg"] == cfg.keys.draft_deg
+
+    def test_sizes_are_clamped_not_trusted(self):
+        item = FeatureItem(
+            kind="vent", position=[0, 0, 0], params={"radius": 5000.0}
+        ).normalised()
+        assert item.params["radius"] == features.PARAM_BOUNDS["vent"]["radius"][1]
+
+    def test_rejects_an_unknown_kind(self):
+        with pytest.raises(ValueError, match="unknown feature kind"):
+            FeatureItem(kind="hinge", position=[0, 0, 0]).normalised()
+
+    def test_rejects_a_broken_position(self):
+        with pytest.raises(ValueError, match="three finite numbers"):
+            FeatureItem(kind="vent", position=[0, float("nan"), 0]).normalised()
+
+    def test_duplicate_ids_are_made_unique(self):
+        plan = FeaturePlan(
+            items=[
+                FeatureItem(kind="vent", position=[0, 0, 0], id="v"),
+                FeatureItem(kind="vent", position=[1, 0, 0], id="v"),
+            ]
+        ).normalised()
+        assert len({i.id for i in plan.items}) == 2
+
+    def test_enabled_items_come_out_grouped_by_kind(self):
+        plan = FeaturePlan(
+            items=[
+                FeatureItem(kind="vent", position=[0, 0, 0]),
+                FeatureItem(kind="key", position=[1, 0, 0]),
+                FeatureItem(kind="spout", position=[2, 0, 0], enabled=False),
+                FeatureItem(kind="key", position=[3, 0, 0]),
+            ]
+        ).normalised()
+        assert [i.kind for i in plan.enabled_items()] == ["key", "key", "vent"]
+
+
 class TestApplyFeatures:
     @pytest.fixture(scope="class")
     def built(self, taper):
@@ -144,3 +202,106 @@ class TestApplyFeatures:
         a, b, rep = features.apply_features(res, taper, cfg)
         assert a is res.half_a and b is res.half_b
         assert rep.keys == {} and rep.spout == {} and rep.vents == {}
+
+    def test_every_planned_item_is_accounted_for(self, built):
+        _, _, _, rep = built
+        assert {i["status"] for i in rep.items} <= {"applied", "skipped", "off"}
+        assert all(i["id"] for i in rep.items)
+
+
+class TestApplyEditedPlan:
+    """The interactive path: re-cut a changed plan into the same base halves."""
+
+    @pytest.fixture(scope="class")
+    def base(self, taper):
+        cfg = MoldConfig(block_margin=8.0, pour_axis=(0.0, 0.0, 1.0))
+        cfg.parting.grid = 110
+        res = mold.build_mold(taper, [1, 0, 0], cfg)
+        ctx = features.FeatureContext.from_mold(res)
+        return res, ctx, features.plan_features(ctx, cfg)
+
+    def test_planning_touches_no_geometry(self, base):
+        """A proposal must be cheap enough to make before the user asks."""
+        res, _, plan = base
+        assert plan.items
+        assert {i.kind for i in plan.items} <= set(features.KINDS)
+        assert all(i.source == "auto" for i in plan.items)
+
+    def test_switching_an_item_off_leaves_it_uncut(self, base):
+        res, ctx, plan = base
+        edited = plan.as_dict()
+        for item in edited["items"]:
+            item["enabled"] = item["kind"] != "key"
+        a, b, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        assert rep.keys["count"] == 0
+        assert {i["status"] for i in rep.items if i["kind"] == "key"} == {"off"}
+        # no keys added to A means A is only smaller than the base, never larger
+        assert a.volume <= res.half_a.volume
+
+    def test_a_bigger_knob_takes_more_material(self, base):
+        res, ctx, plan = base
+
+        def volume_with(radius):
+            edited = plan.as_dict()
+            edited["items"] = [i for i in edited["items"] if i["kind"] == "key"]
+            for item in edited["items"]:
+                item["params"]["radius"] = radius
+            a, _, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+            assert rep.keys["count"] == len(edited["items"])
+            return a.volume
+
+        assert volume_with(6.0) > volume_with(3.0)
+
+    def test_a_knob_over_the_cavity_is_refused_with_a_reason(self, base, taper):
+        res, ctx, plan = base
+        centre = taper.bounds.mean(axis=0)  # straight through the middle of the cast
+        edited = {
+            "pour_axis": plan.pour_axis,
+            "items": [
+                {
+                    "id": "key-user",
+                    "kind": "key",
+                    "source": "user",
+                    "position": [float(v) for v in centre],
+                }
+            ],
+        }
+        a, b, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        assert a is res.half_a and b is res.half_b  # nothing was cut
+        (entry,) = rep.items
+        assert entry["status"] == "skipped"
+        assert "cavity" in entry["reason"]
+
+    def test_a_hand_placed_knob_off_the_cavity_is_cut(self, base):
+        res, ctx, plan = base
+        source = next(i for i in plan.items if i.kind == "key")
+        edited = {
+            "pour_axis": plan.pour_axis,
+            "items": [
+                {
+                    "id": "key-user",
+                    "kind": "key",
+                    "source": "user",
+                    "position": list(source.position),
+                    "params": {"radius": 4.0, "height": 5.0},
+                }
+            ],
+        }
+        a, b, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        assert rep.items[0]["status"] == "applied"
+        assert rep.keys["count"] == 1 and rep.keys["radius_mm"] == 4.0
+        assert a.volume > res.half_a.volume and b.volume < res.half_b.volume
+
+    def test_edited_halves_are_still_solid_and_still_open(self, base, taper):
+        res, ctx, plan = base
+        edited = plan.as_dict()
+        for item in edited["items"]:
+            if item["kind"] == "key":
+                item["params"]["radius"] = 6.0
+                item["params"]["height"] = 6.0
+            if item["kind"] == "spout":
+                item["params"]["outer_radius"] = 12.0
+        a, b, _ = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        for half in (a, b):
+            assert validate.solid_report(half)["boundary_edges"] == 0
+        assert validate.separation_report(a, b, taper, res.direction)["opens"]

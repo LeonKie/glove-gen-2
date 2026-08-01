@@ -128,6 +128,29 @@ class TestPartingSolid:
         assert not sheet.is_watertight  # it is a sheet, not a solid
 
 
+class TestPersistence:
+    """The surface outlives the run that solved it, so features can be re-cut."""
+
+    def test_round_trips_through_disk(self, dumbbell, tmp_path):
+        surface, _, _ = build(dumbbell, [1, 0, 0])
+        again = parting.PartingSurface.load(surface.save(tmp_path / "parting.npz"))
+        assert np.array_equal(again.h, surface.h)
+        assert np.array_equal(again.constrained, surface.constrained)
+        assert np.array_equal(again.band_lo, surface.band_lo)
+        assert np.array_equal(again.band_hi, surface.band_hi)
+        assert np.array_equal(again.xs, surface.xs)
+        assert again.report() == surface.report()
+
+    def test_reloaded_frame_still_points_the_same_way(self, dumbbell, tmp_path):
+        surface, _, _ = build(dumbbell, [1, 0, 0])
+        again = parting.PartingSurface.load(surface.save(tmp_path / "p.npz"))
+        assert np.allclose(again.frame.rot, surface.frame.rot)
+        assert np.allclose(again.frame.direction, [1, 0, 0])
+        # and it still produces the same splitting solid
+        z_top = float(surface.h.max()) + 5.0
+        assert again.solid(z_top).volume == pytest.approx(surface.solid(z_top).volume)
+
+
 class TestSmoothing:
     def test_higher_lambda_flattens_the_surface(self, dumbbell):
         frame = Frame.from_direction([1, 0, 0])

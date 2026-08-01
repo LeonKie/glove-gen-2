@@ -54,7 +54,37 @@ def _config_from_args(args) -> MoldConfig:
         cfg.vents.enabled = False
     if getattr(args, "keys", None) is not None:
         cfg.keys.count = args.keys
+    if getattr(args, "vents", None) is not None:
+        cfg.vents.count = args.vents
+    # Sizes. Placement stays automatic; these only change how big the knobs and
+    # holes it picks come out.
+    for target, attr, option in (
+        (cfg.keys, "radius", "key_radius"),
+        (cfg.keys, "height", "key_height"),
+        (cfg.keys, "draft_deg", "key_draft"),
+        (cfg.keys, "clearance", "key_clearance"),
+        (cfg.spout, "inner_radius", "spout_inner"),
+        (cfg.spout, "outer_radius", "spout_outer"),
+        (cfg.vents, "radius", "vent_radius"),
+    ):
+        value = getattr(args, option, None)
+        if value is not None:
+            setattr(target, attr, value)
     return cfg
+
+
+def _load_plan(path: Path | None):
+    """Read a feature plan written by an earlier run, if one was asked for.
+
+    ``report.json`` carries the plan a run used, so editing that and passing it
+    back is how a command-line user overrides the automatic choice -- the same
+    document the web app edits interactively.
+    """
+    if path is None:
+        return None
+    data = json.loads(Path(path).read_text())
+    # Accept either a bare plan or a whole report containing one.
+    return data.get("feature_plan", data) if isinstance(data, dict) else data
 
 
 def _progress_printer(quiet: bool):
@@ -121,6 +151,7 @@ def cmd_mold(args) -> int:
         cfg,
         direction=args.direction,
         verify=not args.no_verify,
+        plan=_load_plan(args.plan),
         progress=_progress_printer(args.quiet),
     )
     written = result.write(args.out, extras=not args.no_extras)
@@ -172,9 +203,35 @@ def main(argv: list[str] | None = None) -> int:
     p_mo.add_argument("--grid", type=int, default=None, help="parting surface grid resolution")
     p_mo.add_argument("--cavity-offset", type=float, default=None, help="grow the cavity, mm")
     p_mo.add_argument("--keys", type=int, default=None, help="number of alignment keys")
+    p_mo.add_argument("--vents", type=int, default=None, help="maximum number of vents")
     p_mo.add_argument("--no-keys", action="store_true")
     p_mo.add_argument("--no-spout", action="store_true")
     p_mo.add_argument("--no-vents", action="store_true")
+
+    sizes = p_mo.add_argument_group(
+        "feature sizes",
+        "Placement stays automatic; these change how big the knobs and holes are.",
+    )
+    sizes.add_argument("--key-radius", type=float, default=None, help="key radius, mm")
+    sizes.add_argument("--key-height", type=float, default=None, help="key height, mm")
+    sizes.add_argument("--key-draft", type=float, default=None, help="key draft angle, degrees")
+    sizes.add_argument(
+        "--key-clearance", type=float, default=None, help="key/socket gap per side, mm"
+    )
+    sizes.add_argument(
+        "--spout-inner", type=float, default=None, help="spout radius at the cavity, mm"
+    )
+    sizes.add_argument(
+        "--spout-outer", type=float, default=None, help="spout radius at the block face, mm"
+    )
+    sizes.add_argument("--vent-radius", type=float, default=None, help="vent radius, mm")
+    p_mo.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help="apply this feature plan instead of choosing one "
+        "(a plan, or a report.json containing one)",
+    )
     p_mo.add_argument("--no-verify", action="store_true", help="skip the separation check")
     p_mo.add_argument("--no-extras", action="store_true", help="only write the two halves")
     p_mo.add_argument("--heatmap", action="store_true", help="also write undercut_heatmap.ply")

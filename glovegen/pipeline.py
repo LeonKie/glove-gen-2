@@ -39,6 +39,7 @@ class PipelineResult:
     feature_report: FeatureReport
     direction_score: demold.DirectionScore | None
     separation: dict
+    feature_plan: features.FeaturePlan | None = None
     timings: dict = field(default_factory=dict)
 
     def report(self) -> dict:
@@ -51,6 +52,12 @@ class PipelineResult:
             },
             "parting_surface": self.mold_result.stats.get("parting", {}),
             "features": self.feature_report.as_dict(),
+            # The plan is the editable form of the features: hand it back so a
+            # caller can change a size or drop an item and re-run, instead of
+            # reverse-engineering it from the report.
+            "feature_plan": (
+                self.feature_plan.as_dict() if self.feature_plan is not None else {}
+            ),
             "separation": self.separation,
             "halves": {
                 "half_a": meshio.mesh_stats(self.half_a),
@@ -90,6 +97,7 @@ def run(
     direction=None,
     search_direction: bool = True,
     verify: bool = True,
+    plan: features.FeaturePlan | dict | None = None,
     progress=None,
 ) -> PipelineResult:
     """Build a two-part mold.
@@ -97,6 +105,10 @@ def run(
     ``direction`` pins the pull direction; otherwise it is searched for (unless
     ``search_direction`` is False, in which case the part's shortest bounding-box
     axis is used as a cheap stand-in).
+
+    ``plan`` pins the knobs and holes. Left alone, they are chosen
+    automatically -- which is what a command-line run wants: one invocation,
+    a finished mold, no questions.
     """
     cfg = cfg or MoldConfig()
     report = progress or (lambda *a, **k: None)
@@ -147,8 +159,19 @@ def run(
     timings["mold_total"] = time.time() - t0
 
     t0 = time.time()
-    half_a, half_b, feat = features.apply_features(
-        mold_result, part, cfg, progress=report
+    ctx = features.FeatureContext.from_mold(mold_result)
+    if plan is None:
+        report(0.74, "planning features")
+        plan = features.plan_features(ctx, cfg)
+    else:
+        plan = features.FeaturePlan.from_dict(plan)
+    half_a, half_b, feat = features.apply_plan(
+        mold_result.half_a,
+        mold_result.half_b,
+        ctx,
+        plan,
+        cfg=cfg,
+        progress=lambda f, msg: report(0.76 + 0.18 * f, msg),
     )
     timings["features"] = time.time() - t0
     validate.assert_solid_enough(half_a, "half A (with features)")
@@ -172,6 +195,104 @@ def run(
         mold_result=mold_result,
         feature_report=feat,
         direction_score=score,
+        separation=separation,
+        feature_plan=features.FeaturePlan.from_dict(plan).normalised(cfg),
+        timings=timings,
+    )
+
+
+@dataclass
+class FeatureResult:
+    """Outcome of re-cutting features into halves that were already built."""
+
+    half_a: trimesh.Trimesh
+    half_b: trimesh.Trimesh
+    direction: np.ndarray
+    plan: features.FeaturePlan
+    feature_report: FeatureReport
+    separation: dict = field(default_factory=dict)
+    timings: dict = field(default_factory=dict)
+
+    def report(self) -> dict:
+        a, b = float(self.half_a.volume), float(self.half_b.volume)
+        return {
+            "pull_direction": [round(float(v), 6) for v in self.direction],
+            "mold": {
+                "half_a_volume_cm3": round(a / 1000.0, 2),
+                "half_b_volume_cm3": round(b / 1000.0, 2),
+                "mold_volume_cm3": round((a + b) / 1000.0, 2),
+                # Meaningless here: the halves were not just cut from one solid,
+                # they have had material added and removed. Reported as zero so
+                # the shape of the document does not change between job kinds.
+                "split_volume_error_cm3": 0.0,
+            },
+            "features": self.feature_report.as_dict(),
+            "feature_plan": self.plan.as_dict(),
+            "separation": self.separation,
+            "halves": {
+                "half_a": meshio.mesh_stats(self.half_a),
+                "half_b": meshio.mesh_stats(self.half_b),
+            },
+            "timings_s": {k: round(v, 3) for k, v in self.timings.items()},
+        }
+
+    def write(self, out_dir: str | Path) -> dict:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "half_a": str(meshio.export(self.half_a, out_dir / "mold_half_a.stl")),
+            "half_b": str(meshio.export(self.half_b, out_dir / "mold_half_b.stl")),
+        }
+
+
+def apply_feature_plan(
+    half_a: trimesh.Trimesh,
+    half_b: trimesh.Trimesh,
+    ctx: features.FeatureContext,
+    plan: features.FeaturePlan | dict,
+    *,
+    cast: trimesh.Trimesh | None = None,
+    verify: bool = True,
+    progress=None,
+) -> FeatureResult:
+    """Cut a (typically edited) plan into base halves from an earlier run.
+
+    This is the interactive half of the story. Everything up to the split --
+    direction search, parting surface, three booleans on a multi-million-face
+    scan -- is unchanged by moving a knob or widening a vent, so it is not
+    redone: only the features are, against the halves as they came out of the
+    split.
+    """
+    report = progress or (lambda *a, **k: None)
+    timings: dict[str, float] = {}
+
+    report(0.05, "cutting features")
+    t0 = time.time()
+    half_a, half_b, feat = features.apply_plan(
+        half_a, half_b, ctx, plan, progress=lambda f, msg: report(0.05 + 0.75 * f, msg)
+    )
+    timings["features"] = time.time() - t0
+    validate.assert_solid_enough(half_a, "half A (with features)")
+    validate.assert_solid_enough(half_b, "half B (with features)")
+
+    separation: dict = {}
+    if verify:
+        report(0.85, "verifying the mold opens")
+        t0 = time.time()
+        separation = validate.separation_report(
+            half_a, half_b, cast if cast is not None else ctx.cavity, ctx.direction
+        )
+        timings["verify"] = time.time() - t0
+        if not separation.get("opens", False):
+            log.error("mold halves do not separate: %s", separation)
+
+    report(1.0, "done")
+    return FeatureResult(
+        half_a=half_a,
+        half_b=half_b,
+        direction=np.asarray(ctx.direction, dtype=np.float64),
+        plan=features.FeaturePlan.from_dict(plan).normalised(),
+        feature_report=feat,
         separation=separation,
         timings=timings,
     )

@@ -110,6 +110,32 @@ def export(mesh: trimesh.Trimesh, path: str | Path) -> Path:
     return path
 
 
+def save_npz(mesh: trimesh.Trimesh, path: str | Path) -> Path:
+    """Cache a mesh on disk exactly, for a later stage to pick up.
+
+    Not STL: STL stores float32, and a mold half re-loaded through it comes
+    back displaced by tens of microns. That is harmless for printing but it is
+    not the same solid, and features get cut into these halves *after* the
+    expensive stages have already signed off on them.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        vertices=np.asarray(mesh.vertices, dtype=np.float64),
+        faces=np.asarray(mesh.faces, dtype=np.uint32),
+    )
+    return path
+
+
+def load_npz(path: str | Path) -> trimesh.Trimesh:
+    """Inverse of :func:`save_npz`."""
+    with np.load(str(path)) as data:
+        return trimesh.Trimesh(
+            vertices=data["vertices"], faces=data["faces"], process=False
+        )
+
+
 def mesh_stats(mesh: trimesh.Trimesh) -> dict:
     """Summary of a mesh, including *why* it might not be strictly watertight.
 

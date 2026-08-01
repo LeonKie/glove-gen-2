@@ -76,8 +76,18 @@ class TestPipeline:
 
     def test_report_covers_every_stage(self, result):
         rep = result.report()
-        for key in ("part", "mold", "parting_surface", "features", "halves", "timings_s"):
+        for key in (
+            "part", "mold", "parting_surface", "features", "feature_plan",
+            "halves", "timings_s",
+        ):
             assert key in rep, key
+
+    def test_report_hands_back_an_editable_plan(self, result):
+        """What the run chose, in the form you would hand back to change it."""
+        plan = result.report()["feature_plan"]
+        assert plan["items"]
+        assert {i["kind"] for i in plan["items"]} <= {"key", "spout", "vent"}
+        assert all(i["params"] for i in plan["items"])
 
     def test_writes_the_printable_parts(self, result, tmp_path):
         written = result.write(tmp_path)
@@ -121,6 +131,66 @@ class TestPipeline:
         broken.export(str(path))
         with pytest.raises(validate.SolidError, match="boundary"):
             pipeline.run(path, MoldConfig())
+
+
+class TestFeaturePlanning:
+    """Automatic by default; an explicit plan wins when there is one."""
+
+    @pytest.fixture(scope="class")
+    def cfg(self):
+        cfg = MoldConfig(block_margin=8.0, pour_axis=(0.0, 0.0, 1.0))
+        cfg.parting.grid = 90
+        return cfg
+
+    def test_run_plans_features_by_default(self, taper, cfg):
+        result = pipeline.run(taper, cfg, direction=[1, 0, 0], verify=False)
+        assert result.feature_plan.items
+        assert result.feature_report.keys["count"] > 0
+
+    def test_an_explicit_plan_replaces_the_automatic_one(self, taper, cfg):
+        auto = pipeline.run(taper, cfg, direction=[1, 0, 0], verify=False)
+        plan = auto.report()["feature_plan"]
+        plan["items"] = [i for i in plan["items"] if i["kind"] == "spout"]
+        pinned = pipeline.run(
+            taper, cfg, direction=[1, 0, 0], verify=False, plan=plan
+        )
+        assert pinned.feature_report.keys == {}
+        assert pinned.feature_report.spout["length_mm"] > 0
+        assert pinned.half_a.volume < auto.half_a.volume  # no keys added
+
+    def test_features_can_be_re_cut_without_rebuilding_the_mold(self, taper, cfg):
+        """The web app's loop: keep the split, change the knobs."""
+        from glovegen import features
+
+        built = pipeline.run(taper, cfg, direction=[1, 0, 0], verify=False)
+        ctx = features.FeatureContext.from_mold(built.mold_result)
+        plan = built.report()["feature_plan"]
+        for item in plan["items"]:
+            if item["kind"] == "key":
+                item["params"]["radius"] = 3.0
+
+        out = pipeline.apply_feature_plan(
+            built.mold_result.half_a, built.mold_result.half_b, ctx, plan, cast=taper
+        )
+        assert out.separation["opens"]
+        assert out.feature_report.keys["radius_mm"] == 3.0
+        # smaller knobs than the 5 mm default, so less material added to A
+        assert out.half_a.volume < built.half_a.volume
+        rep = out.report()
+        assert set(rep) >= {"mold", "features", "feature_plan", "separation", "halves"}
+        json.dumps(rep)
+
+    def test_re_cutting_starts_from_the_base_halves_every_time(self, taper, cfg):
+        """Applying twice must not stack: the second run is not built on the first."""
+        from glovegen import features
+
+        built = pipeline.run(taper, cfg, direction=[1, 0, 0], verify=False)
+        ctx = features.FeatureContext.from_mold(built.mold_result)
+        plan = built.report()["feature_plan"]
+        args = (built.mold_result.half_a, built.mold_result.half_b, ctx, plan)
+        first = pipeline.apply_feature_plan(*args, verify=False)
+        second = pipeline.apply_feature_plan(*args, verify=False)
+        assert first.half_a.volume == pytest.approx(second.half_a.volume, rel=1e-9)
 
 
 class TestHeatmapMesh:
@@ -208,6 +278,63 @@ class TestCLI:
         assert (out / "mold_half_b.stl").exists()
         report = json.loads((out / "report.json").read_text())
         assert report["separation"]["opens"]
+
+    def test_feature_sizes_are_settable(self, taper, tmp_path, capsys):
+        path = tmp_path / "part.stl"
+        taper.export(str(path))
+        out = tmp_path / "out_sized"
+        code = cli.main([
+            "-q", "mold", str(path), "-o", str(out), "--direction", "1", "0", "0",
+            "--margin", "8", "--grid", "90", "--no-vents", "--no-verify",
+            "--key-radius", "3", "--key-height", "6", "--spout-outer", "12",
+        ])
+        assert code == 0
+        report = json.loads((out / "report.json").read_text())
+        assert report["features"]["keys"]["radius_mm"] == 3.0
+        assert report["features"]["keys"]["height_mm"] == 6.0
+        assert report["features"]["spout"]["outer_radius_mm"] == 12.0
+
+    def test_a_saved_plan_can_be_applied_back(self, taper, tmp_path, capsys):
+        """The command line stays automatic, but an edited plan overrides it."""
+        path = tmp_path / "part.stl"
+        taper.export(str(path))
+        common = [
+            "-q", "mold", str(path), "--direction", "1", "0", "0",
+            "--margin", "8", "--grid", "90", "--no-vents", "--no-verify",
+        ]
+        auto = tmp_path / "auto"
+        assert cli.main([*common, "-o", str(auto)]) == 0
+        report = json.loads((auto / "report.json").read_text())
+        assert report["features"]["keys"]["count"] > 0
+
+        plan = report["feature_plan"]
+        for item in plan["items"]:
+            if item["kind"] == "key":
+                item["enabled"] = False
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+
+        edited = tmp_path / "edited"
+        assert cli.main([*common, "-o", str(edited), "--plan", str(plan_path)]) == 0
+        again = json.loads((edited / "report.json").read_text())
+        assert again["features"]["keys"]["count"] == 0
+        assert again["features"]["spout"]["length_mm"] > 0
+
+    def test_a_whole_report_is_accepted_as_a_plan(self, taper, tmp_path, capsys):
+        path = tmp_path / "part.stl"
+        taper.export(str(path))
+        common = [
+            "-q", "mold", str(path), "--direction", "1", "0", "0",
+            "--margin", "8", "--grid", "90", "--no-verify", "--no-extras",
+        ]
+        first = tmp_path / "first"
+        assert cli.main([*common, "-o", str(first)]) == 0
+        second = tmp_path / "second"
+        assert cli.main([*common, "-o", str(second),
+                         "--plan", str(first / "report.json")]) == 0
+        a = json.loads((first / "report.json").read_text())["feature_plan"]
+        b = json.loads((second / "report.json").read_text())["feature_plan"]
+        assert a["items"] == b["items"]
 
     def test_hull_block_option(self, taper, tmp_path):
         path = tmp_path / "part.stl"

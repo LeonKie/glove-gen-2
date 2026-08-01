@@ -35,8 +35,10 @@ still reproduce the shape exactly.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
@@ -155,6 +157,46 @@ class PartingSurface:
         if mesh.volume < 0:
             mesh.invert()
         return mesh
+
+    # -- persistence ------------------------------------------------------
+
+    def save(self, path: str | Path) -> Path:
+        """Write the surface to a ``.npz`` so a later run can place features.
+
+        Everything a feature needs -- where the mating face sits, which columns
+        pass through the cavity, which way the mold pulls -- lives here, and it
+        is a few hundred kB against the minute it took to solve.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            path,
+            rot=self.frame.rot,
+            direction=self.frame.direction,
+            xs=self.xs,
+            ys=self.ys,
+            h=self.h,
+            constrained=self.constrained,
+            band_lo=self.band_lo,
+            band_hi=self.band_hi,
+            stats=np.array(json.dumps(self.stats)),
+        )
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> "PartingSurface":
+        """Inverse of :meth:`save`."""
+        with np.load(str(path), allow_pickle=False) as d:
+            return cls(
+                frame=Frame(direction=d["direction"], rot=d["rot"]),
+                xs=d["xs"],
+                ys=d["ys"],
+                h=d["h"],
+                constrained=d["constrained"],
+                band_lo=d["band_lo"],
+                band_hi=d["band_hi"],
+                stats=json.loads(str(d["stats"])),
+            )
 
     # -- reporting --------------------------------------------------------
 

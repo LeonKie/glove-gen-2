@@ -87,6 +87,17 @@ class TestValidation:
         res = client.post("/api/jobs", json={"mesh_id": "deadbeef", "kind": "polish"})
         assert res.status_code == 422
 
+    def test_features_job_needs_a_source(self, client):
+        res = client.post("/api/jobs", json={"kind": "features", "config": {}})
+        assert res.status_code == 422
+
+    def test_features_job_for_unknown_source(self, client):
+        res = client.post(
+            "/api/jobs",
+            json={"kind": "features", "config": {"source_job": "deadbeef", "plan": {}}},
+        )
+        assert res.status_code == 404
+
     def test_unknown_job_is_404(self, client):
         assert client.get("/api/jobs/deadbeef").status_code == 404
         assert client.get("/api/jobs/deadbeef/files/x.stl").status_code == 404
@@ -146,6 +157,113 @@ class TestRoundTrip:
         assert stl.status_code == 200 and len(stl.content) > 1000
         for which in ("half_a", "half_b", "parting"):
             assert client.get(f"/api/jobs/{job_id}/preview/{which}.bin").status_code == 200
+
+    def test_features_are_re_cut_from_the_built_mold(self, client, part_bytes):
+        """The web app's second step: edit the proposal, re-apply, no rebuild."""
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball4.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+
+        mold_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 10,
+                    "parting": {"grid": 70},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                },
+            },
+        ).json()["job"]["id"]
+        mold_job = _wait_job(client, mold_id)
+        assert mold_job["state"] == "done", mold_job.get("message")
+
+        plan = mold_job["result"]["plan"]
+        assert mold_job["result"]["base_job"] == mold_id
+        spout = next(i for i in plan["items"] if i["kind"] == "spout")
+        spout["params"]["outer_radius"] = 12.0
+
+        job = client.post(
+            "/api/jobs",
+            json={"kind": "features", "config": {"source_job": mold_id, "plan": plan}},
+        ).json()["job"]
+        assert job["mesh_id"] == mesh_id
+        done = _wait_job(client, job["id"])
+        assert done["state"] == "done", done.get("message")
+
+        report = done["result"]["report"]
+        assert report["features"]["spout"]["outer_radius_mm"] == 12.0
+        assert report["separation"]["opens"]
+        assert set(done["parts"]) >= {"mold_half_a.stl", "mold_half_b.stl", "report.json"}
+        for which in ("half_a", "half_b", "parting"):
+            assert client.get(f"/api/jobs/{job['id']}/preview/{which}.bin").status_code == 200
+
+        # an edit of an edit still re-cuts the original mold, never the edited one
+        chained = client.post(
+            "/api/jobs",
+            json={
+                "kind": "features",
+                "config": {"source_job": job["id"], "plan": done["result"]["plan"]},
+            },
+        ).json()["job"]
+        assert chained["config"]["base_job"] == mold_id
+
+    def test_features_job_rejects_a_broken_plan(self, client, part_bytes):
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball5.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+        mold_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 10,
+                    "parting": {"grid": 70},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                },
+            },
+        ).json()["job"]["id"]
+        assert _wait_job(client, mold_id)["state"] == "done"
+
+        res = client.post(
+            "/api/jobs",
+            json={
+                "kind": "features",
+                "config": {
+                    "source_job": mold_id,
+                    "plan": {"items": [{"kind": "hinge", "position": [0, 0, 0]}]},
+                },
+            },
+        )
+        assert res.status_code == 422
+
+    def test_features_job_needs_a_finished_source(self, client, part_bytes):
+        """An analyze job has no cached mold to cut into."""
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball6.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+        analyze_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "analyze",
+                "config": {"demold": {"coarse_dirs": 12, "fine_dirs": 12,
+                                      "coarse_grid": 24, "fine_grid": 24}},
+            },
+        ).json()["job"]["id"]
+        assert _wait_job(client, analyze_id)["state"] == "done"
+        res = client.post(
+            "/api/jobs",
+            json={"kind": "features", "config": {"source_job": analyze_id, "plan": {}}},
+        )
+        assert res.status_code == 409
 
     def test_heatmap_rejects_bad_directions(self, client, part_bytes):
         mesh_id = client.post(
