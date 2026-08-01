@@ -56,6 +56,19 @@ log = logging.getLogger(__name__)
 # the silhouette a neighbour can be tens of mm away, so this needs to be large.
 _HARD_WEIGHT = 1.0e6
 
+# How far the splitting solid overhangs the block footprint, in mm.
+#
+# The footprint the surface spans *is* the block's own extent, so a splitting
+# solid that stops there hands the boolean four pairs of exactly coplanar side
+# walls. manifold3d resolves those into a fan of needle triangles -- tens of mm
+# long, microns wide -- lying in the wall plane. They cost nothing in volume
+# (the split volume error stays at 1e-5 cm^3) and print fine, but a needle
+# thinner than its own coordinate round-off has no meaningful normal, so the
+# halves render as a starburst of streaks radiating off the block. Overhanging
+# keeps the walls strictly outside the block, so the coincidence never arises.
+# Anything past the block wall works; a ring of four extra grid lines is free.
+_SOLID_OVERHANG_MM = 5.0
+
 # Tolerance for "h left its feasible band", in mm. Deliberately physical rather
 # than epsilon-sized: near the silhouette the band legitimately narrows to a few
 # microns, and asking a finite-weight least-squares solve to honour a 7-micron
@@ -83,13 +96,15 @@ class PartingSurface:
 
     # -- geometry ---------------------------------------------------------
 
-    def _nodes_local(self, z: np.ndarray) -> np.ndarray:
-        gx, gy = np.meshgrid(self.xs, self.ys, indexing="ij")
+    def _nodes_local(self, z: np.ndarray, xs=None, ys=None) -> np.ndarray:
+        gx, gy = np.meshgrid(
+            self.xs if xs is None else xs, self.ys if ys is None else ys, indexing="ij"
+        )
         return np.column_stack([gx.ravel(), gy.ravel(), np.asarray(z).ravel()])
 
-    def _grid_faces(self, flip: bool) -> np.ndarray:
+    def _grid_faces(self, flip: bool, shape=None) -> np.ndarray:
         """Triangulate the node grid; ``flip`` reverses the winding."""
-        nx, ny = self.shape
+        nx, ny = self.shape if shape is None else shape
         idx = np.arange(nx * ny).reshape(nx, ny)
         v00 = idx[:-1, :-1].ravel()
         v10 = idx[1:, :-1].ravel()
@@ -108,27 +123,43 @@ class PartingSurface:
             vertices=verts, faces=self._grid_faces(flip=False), process=False
         )
 
-    def solid(self, z_top: float) -> trimesh.Trimesh:
+    def solid(
+        self, z_top: float, *, overhang: float = _SOLID_OVERHANG_MM
+    ) -> trimesh.Trimesh:
         """Closed solid filling everything between the surface and ``z_top``.
 
         Intersecting the mold with this solid yields the half that pulls along
         ``+direction``; subtracting it yields the other half.
+
+        ``overhang`` pushes the solid's side walls that far past the footprint,
+        so they do not land exactly on the block's own walls -- see
+        ``_SOLID_OVERHANG_MM``. The sheet is extended flat at its edge height,
+        which is outside the part in every column, so the cut inside the block
+        is unchanged.
         """
-        nx, ny = self.shape
-        n = nx * ny
         if z_top <= float(self.h.max()):
             raise ValueError(
                 f"z_top={z_top:.3f} is not above the parting surface "
                 f"(max h={float(self.h.max()):.3f})"
             )
 
-        bottom = self._nodes_local(self.h)
-        top = self._nodes_local(np.full_like(self.h, float(z_top)))
+        xs, ys, h = self.xs, self.ys, self.h
+        if overhang > 0:
+            xs = np.concatenate([[xs[0] - overhang], xs, [xs[-1] + overhang]])
+            ys = np.concatenate([[ys[0] - overhang], ys, [ys[-1] + overhang]])
+            h = np.pad(h, 1, mode="edge")
+
+        nx, ny = len(xs), len(ys)
+        n = nx * ny
+        shape = (nx, ny)
+
+        bottom = self._nodes_local(h, xs, ys)
+        top = self._nodes_local(np.full_like(h, float(z_top)), xs, ys)
         verts_local = np.vstack([bottom, top])
 
         faces = [
-            self._grid_faces(flip=True),  # underside, normals along -Z
-            self._grid_faces(flip=False) + n,  # cap, normals along +Z
+            self._grid_faces(flip=True, shape=shape),  # underside, normals -Z
+            self._grid_faces(flip=False, shape=shape) + n,  # cap, normals +Z
         ]
 
         idx = np.arange(n).reshape(nx, ny)

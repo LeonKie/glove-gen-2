@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import trimesh
 
 from glovegen import parting
 from glovegen.config import PartingConfig
@@ -96,7 +97,7 @@ class TestPartingSolid:
     def test_volume_matches_the_analytic_prism(self, sphere):
         surface, _, hi = build(sphere, [0, 0, 1])
         z_top = float(hi[2]) + 1.0
-        solid = surface.solid(z_top)
+        solid = surface.solid(z_top, overhang=0.0)
         assert solid.volume == pytest.approx(
             analytic_prism_volume(surface, z_top), rel=1e-9
         )
@@ -109,11 +110,43 @@ class TestPartingSolid:
 
     def test_solid_covers_the_whole_footprint(self, sphere):
         surface, lo, hi = build(sphere, [0, 0, 1])
-        solid = surface.solid(float(hi[2]) + 1.0)
+        solid = surface.solid(float(hi[2]) + 1.0, overhang=0.0)
         frame = surface.frame
         local = frame.to_local(solid.vertices)
         assert local[:, 0].min() == pytest.approx(surface.xs[0], abs=1e-6)
         assert local[:, 0].max() == pytest.approx(surface.xs[-1], abs=1e-6)
+
+    def test_solid_overhangs_the_block_walls(self, sphere):
+        """The side walls must miss the block's, or the boolean emits needles."""
+        surface, lo, hi = build(sphere, [0, 0, 1])
+        solid = surface.solid(float(hi[2]) + 1.0, overhang=5.0)
+        local = surface.frame.to_local(solid.vertices)
+        assert local[:, 0].min() == pytest.approx(surface.xs[0] - 5.0, abs=1e-6)
+        assert local[:, 0].max() == pytest.approx(surface.xs[-1] + 5.0, abs=1e-6)
+        assert local[:, 1].min() == pytest.approx(surface.ys[0] - 5.0, abs=1e-6)
+        assert local[:, 1].max() == pytest.approx(surface.ys[-1] + 5.0, abs=1e-6)
+        assert solid.is_watertight
+
+    def test_overhang_does_not_move_the_cut(self, dumbbell):
+        """The extension is flat at the edge height, so h is untouched: the two
+        solids agree wherever the block is, which is all that gets cut."""
+        surface, _, hi = build(dumbbell, [1, 0, 0])
+        z_top = float(hi[2]) + 1.0
+        plain = surface.solid(z_top, overhang=0.0)
+        padded = surface.solid(z_top, overhang=5.0)
+        # The extra volume is exactly the flat skirt round the outside, so
+        # clipping the padded solid back to the footprint must recover the plain
+        # one. The clip box spans the footprint in x/y and comfortably brackets
+        # the solid in z.
+        assert padded.volume > plain.volume
+        z_lo = float(surface.h.min()) - 1.0
+        lo = np.array([surface.xs[0], surface.ys[0], z_lo])
+        hi = np.array([surface.xs[-1], surface.ys[-1], z_top + 1.0])
+        box = trimesh.creation.box(extents=(hi - lo))
+        box.apply_translation((lo + hi) / 2.0)
+        box.apply_transform(np.linalg.inv(surface.frame.transform()))
+        clip = trimesh.boolean.intersection([padded, box], engine="manifold")
+        assert clip.volume == pytest.approx(plain.volume, rel=1e-6)
 
     def test_rejects_a_z_top_below_the_surface(self, sphere):
         surface, _, _ = build(sphere, [0, 0, 1])
