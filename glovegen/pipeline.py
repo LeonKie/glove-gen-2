@@ -10,8 +10,10 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+from . import core as core_mod
 from . import demold, features, meshio, mold, validate
 from .config import MoldConfig
+from .core import CoreResult
 from .features import FeatureReport
 from .mold import MoldResult
 
@@ -24,6 +26,7 @@ STAGES = (
     "parting",
     "cavity",
     "split",
+    "core",
     "features",
     "verify",
 )
@@ -40,7 +43,24 @@ class PipelineResult:
     direction_score: demold.DirectionScore | None
     separation: dict
     feature_plan: features.FeaturePlan | None = None
+    # Present only when cfg.core.enabled. `core` is the one-piece core; `core_a`
+    # and `core_b` are set instead when cfg.core.split cut it on the parting
+    # surface. `glove` is what will be cast, kept for inspection.
+    core: trimesh.Trimesh | None = None
+    core_a: trimesh.Trimesh | None = None
+    core_b: trimesh.Trimesh | None = None
+    glove: trimesh.Trimesh | None = None
+    core_result: CoreResult | None = None
+    core_stats: dict = field(default_factory=dict)
     timings: dict = field(default_factory=dict)
+
+    def core_parts(self) -> dict[str, trimesh.Trimesh]:
+        """The printable core pieces by output name, empty if there is no core."""
+        if self.core_a is not None and self.core_b is not None:
+            return {"core_a": self.core_a, "core_b": self.core_b}
+        if self.core is not None:
+            return {"core": self.core}
+        return {}
 
     def report(self) -> dict:
         """Everything worth knowing about this run, as plain JSON-able data."""
@@ -65,6 +85,8 @@ class PipelineResult:
             },
             "timings_s": {k: round(v, 3) for k, v in self.timings.items()},
         }
+        if self.core_stats:
+            out["core"] = self.core_stats
         if self.direction_score is not None:
             out["demold"] = self.direction_score.as_dict()
         return out
@@ -77,6 +99,12 @@ class PipelineResult:
             "half_a": str(meshio.export(self.half_a, out_dir / "mold_half_a.stl")),
             "half_b": str(meshio.export(self.half_b, out_dir / "mold_half_b.stl")),
         }
+        for name, mesh in self.core_parts().items():
+            written[name] = str(meshio.export(mesh, out_dir / f"{name}.stl"))
+        if extras and self.glove is not None:
+            written["glove_preview"] = str(
+                meshio.export(self.glove, out_dir / "glove_preview.stl")
+            )
         if extras:
             written["parting_surface"] = str(
                 meshio.export(
@@ -158,11 +186,31 @@ def run(
     timings.update(mold_result.timings)
     timings["mold_total"] = time.time() - t0
 
-    t0 = time.time()
     ctx = features.FeatureContext.from_mold(mold_result)
+    cavity = mold_result.cavity if mold_result.cavity is not None else part
+
+    core_result: CoreResult | None = None
+    pour_axis = None
+    if cfg.core.enabled:
+        report(0.72, "building the core")
+        t0 = time.time()
+        pour_axis = features.choose_pour_axis(cavity, cfg)
+        core_result = core_mod.build_core(
+            cavity,
+            mold_result.frame,
+            pour_axis,
+            cfg,
+            progress=lambda f, msg: report(0.72 + 0.06 * f, msg),
+        )
+        timings.update(core_result.timings)
+        timings["core_total"] = time.time() - t0
+        # Nothing is cut into the halves for it: the cuff cap is taken from the
+        # cavity, so it already fits the void the cavity left.
+
+    t0 = time.time()
     if plan is None:
-        report(0.74, "planning features")
-        plan = features.plan_features(ctx, cfg)
+        report(0.78, "planning features")
+        plan = features.plan_features(ctx, cfg, pour_axis=pour_axis)
     else:
         plan = features.FeaturePlan.from_dict(plan)
     half_a, half_b, feat = features.apply_plan(
@@ -171,17 +219,37 @@ def run(
         ctx,
         plan,
         cfg=cfg,
-        progress=lambda f, msg: report(0.76 + 0.18 * f, msg),
+        progress=lambda f, msg: report(0.80 + 0.12 * f, msg),
     )
     timings["features"] = time.time() - t0
     validate.assert_solid_enough(half_a, "half A (with features)")
     validate.assert_solid_enough(half_b, "half B (with features)")
+
+    core_mesh = core_a = core_b = glove = None
+    core_stats: dict = {}
+    if core_result is not None:
+        report(0.92, "cutting the glove preview")
+        t0 = time.time()
+        core_mesh = core_result.core
+        glove = core_mod.glove_preview(cavity, core_result)
+        if cfg.core.split:
+            core_a, core_b = mold.split_mold(core_mesh, mold_result.parting_solid)
+        timings["core_finish"] = time.time() - t0
+        core_stats = _core_stats(cavity, core_mesh, glove, core_result, cfg)
 
     separation: dict = {}
     if verify:
         report(0.95, "verifying the mold opens")
         t0 = time.time()
         separation = validate.separation_report(half_a, half_b, part, d)
+        if core_a is not None and core_b is not None:
+            # A split core lifts away with its own mold half, on exactly the
+            # argument that makes the mold open -- so check it the same way.
+            # There is no equivalent check for a one-piece core: see
+            # `release_note` below.
+            core_stats["halves_open"] = validate.separation_report(
+                core_a, core_b, glove, d
+            )["opens"]
         timings["verify"] = time.time() - t0
         if not separation.get("opens", False):
             log.error("mold halves do not separate: %s", separation)
@@ -197,8 +265,62 @@ def run(
         direction_score=score,
         separation=separation,
         feature_plan=features.FeaturePlan.from_dict(plan).normalised(cfg),
+        core=core_mesh,
+        core_a=core_a,
+        core_b=core_b,
+        glove=glove,
+        core_result=core_result,
+        core_stats=core_stats,
         timings=timings,
     )
+
+
+def _core_stats(
+    cavity: trimesh.Trimesh,
+    core: trimesh.Trimesh,
+    glove: trimesh.Trimesh,
+    result: CoreResult,
+    cfg: MoldConfig,
+) -> dict:
+    """The numbers worth checking before printing a core."""
+    stats = dict(result.as_dict())
+    stats.update(
+        {
+            "split": bool(cfg.core.split),
+            # Deliberately not a measured number. A cast glove is a
+            # zero-clearance fit on its former -- the glove's inner surface *is*
+            # the core's surface -- so it comes off by stretching, never by
+            # sliding, and every way of scoring "can the core be withdrawn"
+            # bottoms out on that. Booleans across the coincident surfaces return
+            # slivers; ray columns that skim along them dip in and out of the
+            # extracted mesh and read as deep re-entrancy. Both scored a plain
+            # rod, which slides out perfectly, at 8% of the cast. A number that
+            # wrong is worse than no number, so what is reported instead is the
+            # assumption itself -- and `--core-split` is the way to replace the
+            # assumption with a guarantee.
+            "release_note": (
+                "one-piece core: peeled off a flexible cast, as the pipeline "
+                "already assumes for the mold halves. Use core.split for a "
+                "mechanically guaranteed release."
+            )
+            if not cfg.core.split
+            else "split core: each piece lifts away with its own mold half",
+            "volume_cm3": round(float(core.volume) / 1000.0, 2),
+            "components": core_mod.components(core),
+            "glove_volume_cm3": round(float(glove.volume) / 1000.0, 2),
+            "glove_components": core_mod.components(glove),
+            "wall": validate.core_wall_report(cavity, result.body, cfg.core.thickness),
+        }
+    )
+    if stats["components"] > 1:
+        log.error(
+            "the core is in %d pieces: a %.2f mm wall erased a feature narrower "
+            "than %.2f mm. Reduce core.thickness.",
+            stats["components"],
+            cfg.core.thickness,
+            2.0 * cfg.core.thickness,
+        )
+    return stats
 
 
 @dataclass

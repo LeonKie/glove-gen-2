@@ -17,6 +17,11 @@ const el = {
   margin: $('margin'), marginVal: $('margin-val'),
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
+  optCore: $('opt-core'), optCoreSplit: $('opt-core-split'),
+  coreThickness: $('core-thickness'), coreThicknessVal: $('core-thickness-val'),
+  corePitch: $('core-pitch'), corePitchVal: $('core-pitch-val'),
+  rowCoreThickness: $('row-core-thickness'), rowCoreSplit: $('row-core-split'),
+  rowCorePitch: $('row-core-pitch'),
   build: $('btn-build'), buildStatus: $('build-status'), buildProgress: $('build-progress'),
   panelFeatures: $('panel-features'), featureList: $('feature-list'),
   resetPlan: $('btn-plan-reset'), optVerify: $('opt-verify'),
@@ -1014,8 +1019,23 @@ function moldConfig() {
     keys: { enabled: el.optKeys.checked },
     spout: { enabled: el.optSpout.checked },
     vents: { enabled: el.optVents.checked },
+    core: {
+      enabled: el.optCore.checked,
+      thickness: Number(el.coreThickness.value),
+      split: el.optCoreSplit.checked,
+      // 0 means "let the server pick from the wall thickness".
+      grid_pitch: Number(el.corePitch.value),
+    },
   };
 }
+
+// The core's controls only mean anything with a core, so they stay out of the
+// way until one is asked for.
+el.optCore.onchange = () => {
+  for (const row of [el.rowCoreThickness, el.rowCorePitch, el.rowCoreSplit]) {
+    row.hidden = !el.optCore.checked;
+  }
+};
 
 el.suggest.onclick = async () => {
   el.suggest.disabled = true;
@@ -1135,6 +1155,40 @@ async function showResult(job) {
   if (job.kind === 'mold') {
     rows.splice(2, 0, ['split error', `${r.mold.split_volume_error_cm3.toFixed(5)} cm³`]);
   }
+  const core = r.core;
+  if (core) {
+    const wall = core.wall || {};
+    rows.push(['core', `${(core.volume_cm3 ?? 0).toFixed(0)} cm³`]);
+    if (wall.measured) {
+      rows.push([
+        'glove wall',
+        `${wall.median_mm.toFixed(2)} mm (${wall.min_mm.toFixed(2)}–${wall.max_mm.toFixed(2)})`,
+      ]);
+    }
+    // The pitch that was actually used, which is not always the one asked for:
+    // too fine a grid is coarsened to stay inside the voxel budget. Compare
+    // against what *this job* asked for, not the slider, which has moved on --
+    // and against the auto rule when it asked for nothing.
+    if (core.grid_pitch_mm) {
+      const wanted = Number(job.config?.core?.grid_pitch) ||
+        Math.min(1.0, Math.max(0.1, (core.thickness_mm ?? 2) / 2));
+      const coarsened = core.grid_pitch_mm > wanted + 1e-6;
+      rows.push([
+        'core grid',
+        `${core.grid_pitch_mm.toFixed(2)} mm${coarsened ? ' — coarsened to fit memory' : ''}`,
+        coarsened ? 'warn' : '',
+      ]);
+    }
+    // More than one piece means the wall erased a feature: a severed fingertip
+    // is a broken core, not a cosmetic issue.
+    rows.push([
+      'core pieces', core.components ?? 1, (core.components ?? 1) > 1 ? 'bad' : 'ok',
+    ]);
+    if (core.halves_open !== undefined) {
+      rows.push(['core halves open', core.halves_open ? 'yes' : 'NO',
+        core.halves_open ? 'ok' : 'bad']);
+    }
+  }
   const skipped = (feat.items || []).filter((i) => i.status === 'skipped').length;
   if (skipped) rows.push(['not placed', skipped, 'bad']);
   statsTable(el.resultStats, rows);
@@ -1146,14 +1200,14 @@ async function showResult(job) {
     .join('');
   el.panelResult.hidden = false;
 
-  for (const which of ['half_a', 'half_b', 'parting']) {
+  for (const which of ['half_a', 'half_b', 'parting', 'core']) {
     try {
       const res = await fetch(`/api/jobs/${job.id}/preview/${which}.bin`);
       if (!res.ok) throw new Error(res.statusText);
       setLayer(which, buildGeometry(decodeGGM2(await res.arrayBuffer())),
         which === 'parting' ? { transparent: true, opacity: 0.85 } : {});
       el.layers.querySelector(`[data-layer="${which}"]`).disabled = false;
-    } catch { /* preview is optional */ }
+    } catch { /* preview is optional, and there is no core unless one was asked for */ }
   }
   showLayer('half_a');
 }
@@ -1208,6 +1262,24 @@ for (const slider of [el.az, el.el]) {
 }
 el.margin.addEventListener('input', () => { el.marginVal.textContent = `${el.margin.value} mm`; });
 el.grid.addEventListener('input', () => { el.gridVal.textContent = el.grid.value; });
+
+/** Label the core sliders, spelling out what "auto" currently resolves to.
+ *
+ * Mirrors `core._auto_pitch`: half the wall, capped at 1 mm. Duplicating the
+ * rule here is only for the label — the server still decides — but a bare
+ * "auto" makes the slider's first real step look like a jump from nothing.
+ */
+function syncCoreLabels() {
+  const t = Number(el.coreThickness.value);
+  const pitch = Number(el.corePitch.value);
+  el.coreThicknessVal.textContent = `${t.toFixed(1)} mm`;
+  el.corePitchVal.textContent = pitch
+    ? `${pitch.toFixed(2)} mm`
+    : `auto — ${Math.min(1.0, Math.max(0.1, t / 2)).toFixed(2)} mm`;
+}
+el.coreThickness.addEventListener('input', syncCoreLabels);
+el.corePitch.addEventListener('input', syncCoreLabels);
+syncCoreLabels();
 
 el.layers.querySelectorAll('button').forEach((b) => {
   b.onclick = () => !b.disabled && showLayer(b.dataset.layer);

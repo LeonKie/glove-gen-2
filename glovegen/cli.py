@@ -56,6 +56,10 @@ def _config_from_args(args) -> MoldConfig:
         cfg.keys.count = args.keys
     if getattr(args, "vents", None) is not None:
         cfg.vents.count = args.vents
+    if getattr(args, "core", False):
+        cfg.core.enabled = True
+    if getattr(args, "core_split", False):
+        cfg.core.split = True
     # Sizes. Placement stays automatic; these only change how big the knobs and
     # holes it picks come out.
     for target, attr, option in (
@@ -66,6 +70,9 @@ def _config_from_args(args) -> MoldConfig:
         (cfg.spout, "inner_radius", "spout_inner"),
         (cfg.spout, "outer_radius", "spout_outer"),
         (cfg.vents, "radius", "vent_radius"),
+        (cfg.core, "thickness", "core_thickness"),
+        (cfg.core, "grid_pitch", "core_pitch"),
+        (cfg.core, "cuff_offset", "cuff_offset"),
     ):
         value = getattr(args, option, None)
         if value is not None:
@@ -225,6 +232,33 @@ def main(argv: list[str] | None = None) -> int:
         "--spout-outer", type=float, default=None, help="spout radius at the block face, mm"
     )
     sizes.add_argument("--vent-radius", type=float, default=None, help="vent radius, mm")
+
+    core_grp = p_mo.add_argument_group(
+        "hollow glove (core)",
+        "Cast a glove rather than a solid positive: adds an inner form, inset by "
+        "the wall thickness, trapped at the cuff when the mold closes.",
+    )
+    core_grp.add_argument("--core", action="store_true", help="build a core")
+    core_grp.add_argument(
+        "--core-thickness", type=float, default=None, help="glove wall thickness, mm (default 2)"
+    )
+    core_grp.add_argument(
+        "--core-split",
+        action="store_true",
+        help="cut the core on the parting surface too, so each piece lifts away "
+        "with its own mold half instead of being peeled off",
+    )
+    core_grp.add_argument(
+        "--core-pitch", type=float, default=None,
+        help="voxel pitch of the distance field the inset comes from, mm "
+        "(default: half the wall, capped at 1)",
+    )
+    core_grp.add_argument(
+        "--cuff-offset", type=float, default=None,
+        help="move the glove's opening along the pour axis, mm (negative = further "
+        "down the part)",
+    )
+
     p_mo.add_argument(
         "--plan",
         type=Path,

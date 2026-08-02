@@ -74,6 +74,26 @@
         <label><input type="checkbox" id="opt-spout" checked> Propose pour spout</label>
         <label><input type="checkbox" id="opt-vents" checked> Propose vents</label>
       </div>
+      <div class="row checks">
+        <label><input type="checkbox" id="opt-core"> Hollow glove (add a core)</label>
+      </div>
+      <div class="row" id="row-core-thickness" hidden>
+        <label for="core-thickness">
+          Glove wall <span class="val" id="core-thickness-val">2.0 mm</span>
+        </label>
+        <input type="range" id="core-thickness" min="0.5" max="10" step="0.1" value="2">
+      </div>
+      <div class="row" id="row-core-pitch" hidden>
+        <label for="core-pitch">
+          Core grid <span class="val" id="core-pitch-val">auto</span>
+        </label>
+        <!-- Voxel pitch of the distance field the inset is extracted from, so
+             lower is finer and slower. 0 is auto: half the wall, capped at 1 mm. -->
+        <input type="range" id="core-pitch" min="0" max="2" step="0.25" value="0">
+      </div>
+      <div class="row checks" id="row-core-split" hidden>
+        <label><input type="checkbox" id="opt-core-split"> Split the core too</label>
+      </div>
       <button class="primary big" id="btn-build">Build mold</button>
       <div id="build-status" class="status" hidden></div>
       <div id="build-progress" class="progress" hidden><div class="bar"></div></div>
@@ -116,6 +136,7 @@
       <button data-layer="half_a" disabled>Half A</button>
       <button data-layer="half_b" disabled>Half B</button>
       <button data-layer="parting" disabled>Parting</button>
+      <button data-layer="core" disabled>Core</button>
     </div>
     <div id="legend" hidden>
       <span class="swatch ok"></span> releases

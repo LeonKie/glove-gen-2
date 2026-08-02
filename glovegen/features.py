@@ -802,15 +802,21 @@ class FeatureReport:
 
 
 def plan_features(
-    ctx: FeatureContext, cfg: MoldConfig | None = None
+    ctx: FeatureContext, cfg: MoldConfig | None = None, *, pour_axis=None
 ) -> FeaturePlan:
     """Propose where the knobs and holes go. Cheap: no booleans, no geometry.
 
     This is the automatic pass. Everything it decides is expressed as plain
     data, so it can be shown, edited and re-applied rather than only obeyed.
+
+    ``pour_axis`` can be passed in when the caller has already worked it out --
+    the core needs it before features are planned, and choosing it twice on a
+    million-vertex scan is not free.
     """
     cfg = cfg or MoldConfig()
-    pour_axis = choose_pour_axis(ctx.cavity, cfg)
+    if pour_axis is None:
+        pour_axis = choose_pour_axis(ctx.cavity, cfg)
+    pour_axis = unit(pour_axis)
     items: list[FeatureItem] = []
 
     if cfg.keys.enabled:

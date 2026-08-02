@@ -7,6 +7,45 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _nested_dataclass(f: dataclasses.Field) -> type | None:
+    """The dataclass a config field holds, or None if it holds a plain value.
+
+    Read off the default factory rather than the annotation: this module uses
+    ``from __future__ import annotations``, so ``f.type`` is the *string*
+    ``"DemoldConfig"`` and would have to be resolved by name.
+    """
+    if f.default_factory is dataclasses.MISSING:
+        return None
+    try:
+        value = f.default_factory()
+    except TypeError:
+        return None
+    return type(value) if dataclasses.is_dataclass(value) else None
+
+
+def _from_partial(klass: type, data: Any) -> Any:
+    """Build ``klass`` from a possibly partial dict, recursing into sub-configs.
+
+    Unknown keys are dropped rather than raising: a client sending a field this
+    version does not have should get the default, not a 500.
+
+    Recursive rather than a hand-maintained list of the sub-config names, so
+    ``{"core": {"thickness": 1.5}}`` works the moment ``CoreConfig`` is added to
+    ``MoldConfig`` and keeps working however deep the configs nest. The failure
+    it avoids is quiet: a flat pass builds ``MoldConfig(core={...})`` and hands a
+    plain dict to geometry code expecting a config.
+    """
+    data = dict(data or {})
+    kwargs: dict[str, Any] = {}
+    for f in dataclasses.fields(klass):
+        nested = _nested_dataclass(f)
+        if nested is not None:
+            kwargs[f.name] = _from_partial(nested, data.get(f.name))
+        elif f.name in data:
+            kwargs[f.name] = data[f.name]
+    return klass(**kwargs)
+
+
 @dataclass
 class DemoldConfig:
     """Pull-direction search."""
@@ -103,6 +142,38 @@ class VentConfig:
 
 
 @dataclass
+class CoreConfig:
+    """The inner form that makes the cast hollow.
+
+    The scan is the glove's *outside*; the core is the same shape deflated by
+    ``thickness``, so the cast forms in the gap between them. Off by default --
+    with it disabled the pipeline produces the solid positive it always has.
+    """
+
+    enabled: bool = False
+
+    # Wall thickness of the finished glove: how far the core is inset.
+    thickness: float = 2.0
+
+    # Cut the core on the same parting surface as the mold. A one-piece core is
+    # peeled off a flexible cast; a split one lifts away with its own half, on
+    # the same guarantee that makes the mold open.
+    split: bool = False
+
+    # Voxel pitch of the distance field the inset is extracted from, and the
+    # target edge length of the extracted surface. 0 = derive from thickness.
+    grid_pitch: float = 0.0
+    edge_length: float = 0.0
+    # Coarsen the pitch rather than exceed this many voxels: the distance
+    # transform holds a float64 per voxel, and a mold job already peaks near 4 GB.
+    max_voxels: int = 40_000_000
+
+    # Where the glove ends, along the pour axis, measured from the part's own
+    # extreme. Negative moves the opening further down the part.
+    cuff_offset: float = 0.0
+
+
+@dataclass
 class MoldConfig:
     """Top-level mold configuration."""
 
@@ -131,6 +202,7 @@ class MoldConfig:
     keys: KeyConfig = field(default_factory=KeyConfig)
     spout: SpoutConfig = field(default_factory=SpoutConfig)
     vents: VentConfig = field(default_factory=VentConfig)
+    core: CoreConfig = field(default_factory=CoreConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -138,24 +210,7 @@ class MoldConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MoldConfig":
         """Build a config from a (possibly partial) nested dict."""
-        data = dict(data or {})
-        sub = {
-            "demold": DemoldConfig,
-            "parting": PartingConfig,
-            "keys": KeyConfig,
-            "spout": SpoutConfig,
-            "vents": VentConfig,
-        }
-        kwargs: dict[str, Any] = {}
-        for name, klass in sub.items():
-            raw = data.pop(name, None) or {}
-            valid = {f.name for f in dataclasses.fields(klass)}
-            kwargs[name] = klass(**{k: v for k, v in raw.items() if k in valid})
-        valid_top = {f.name for f in dataclasses.fields(cls)} - set(sub)
-        for k, v in data.items():
-            if k in valid_top:
-                kwargs[k] = v
-        cfg = cls(**kwargs)
+        cfg = _from_partial(cls, data)
         if isinstance(cfg.pour_axis, list):
             cfg.pour_axis = tuple(cfg.pour_axis)
         if isinstance(cfg.demold.forced_direction, list):

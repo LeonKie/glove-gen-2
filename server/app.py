@@ -324,7 +324,7 @@ def job_file(job_id: str, name: str):
 
 @app.get("/api/jobs/{job_id}/preview/{which}.bin")
 def job_preview(job_id: str, which: str):
-    if which not in ("half_a", "half_b", "parting"):
+    if which not in ("half_a", "half_b", "parting", "core"):
         raise HTTPException(404, "no such preview")
     _require_job(job_id)
     target = _safe_child(store.job_dir(job_id), f"{which}.bin")

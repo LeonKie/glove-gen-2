@@ -104,37 +104,53 @@ def build_block(
     return block, local_bounds
 
 
+def to_manifold(mesh: trimesh.Trimesh):
+    """trimesh -> manifold3d, for the operations trimesh's wrapper does not expose."""
+    from manifold3d import Manifold, Mesh
+
+    return Manifold(
+        mesh=Mesh(
+            vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
+            tri_verts=np.asarray(mesh.faces, dtype=np.uint32),
+        )
+    )
+
+
+def from_manifold(solid) -> trimesh.Trimesh:
+    """manifold3d -> trimesh. Inverse of :func:`to_manifold`."""
+    raw = solid.to_mesh()
+    out = trimesh.Trimesh(
+        vertices=np.asarray(raw.vert_properties[:, :3], dtype=np.float64),
+        faces=np.asarray(raw.tri_verts),
+        process=False,
+    )
+    out.merge_vertices()
+    return out
+
+
 def offset_cavity(mesh: trimesh.Trimesh, delta: float) -> trimesh.Trimesh:
     """Grow the cavity by ``delta`` mm, for cast shrinkage or fit clearance.
 
     Uses an exact Minkowski sum, which is expensive on a full-resolution scan;
     the caller is expected to decimate first if it matters.
+
+    Shrinking is not done this way. ``minkowski_difference`` exists but scales
+    with the *product* of the two face counts, which a million-face scan makes
+    hopeless; :mod:`glovegen.core` insets through a distance field instead.
     """
     if abs(delta) < 1e-9:
         return mesh
     if delta < 0:
         raise NotImplementedError(
-            "negative cavity_offset (shrinking the cavity) is not supported"
+            "negative cavity_offset (shrinking the cavity) is not supported; "
+            "see glovegen.core.deflate for the inward offset"
         )
-    from manifold3d import Manifold, Mesh
-
-    def to_manifold(m: trimesh.Trimesh) -> "Manifold":
-        return Manifold(
-            mesh=Mesh(
-                vert_properties=np.asarray(m.vertices, dtype=np.float32),
-                tri_verts=np.asarray(m.faces, dtype=np.uint32),
-            )
-        )
+    from manifold3d import Manifold
 
     ball = trimesh.creation.icosphere(subdivisions=1, radius=float(delta))
-    grown = Manifold.minkowski_sum(to_manifold(mesh), to_manifold(ball)).to_mesh()
-    out = trimesh.Trimesh(
-        vertices=np.asarray(grown.vert_properties[:, :3], dtype=np.float64),
-        faces=np.asarray(grown.tri_verts),
-        process=False,
+    return from_manifold(
+        Manifold.minkowski_sum(to_manifold(mesh), to_manifold(ball))
     )
-    out.merge_vertices()
-    return out
 
 
 def _boolean(op, meshes, label: str) -> trimesh.Trimesh:

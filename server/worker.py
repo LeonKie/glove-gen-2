@@ -191,6 +191,10 @@ def _do_mold(store: Store, job: dict) -> dict:
         "half_a": _write_preview(result.half_a, out_dir / "half_a.bin", PREVIEW_FACES),
         "half_b": _write_preview(result.half_b, out_dir / "half_b.bin", PREVIEW_FACES),
     }
+    if result.core is not None:
+        previews["core"] = _write_preview(
+            result.core, out_dir / "core.bin", PREVIEW_FACES
+        )
     surface = result.mold_result.surface.surface_mesh()
     (out_dir / "parting.bin").write_bytes(
         viewer_format.encode(meshio.decimate(surface, PREVIEW_FACES))
@@ -235,6 +239,10 @@ def _write_base(store: Store, job: dict, result: pipeline.PipelineResult) -> Non
         meshio.save_npz(mold_result.cavity, out_dir / "cavity.npz")
         cavity = "cavity.npz"
 
+    # The core is not cached. Nothing about it depends on the feature plan -- no
+    # feature is cut into it and it cuts nothing into the halves -- so a feature
+    # edit copies the mold job's finished core across rather than rebuilding or
+    # re-cutting it.
     (out_dir / "context.json").write_text(
         json.dumps(
             {
@@ -305,18 +313,34 @@ def _do_features(store: Store, job: dict) -> dict:
 
     report(0.93, "writing parts")
     written = result.write(out_dir)
-    # The parting surface did not change, so carry the base job's copies over
-    # rather than regenerating them; this job's directory then stands alone.
-    for name in ("parting_surface.stl", "parting.bin"):
+    # The parting surface did not change, and neither did the core -- no feature
+    # is cut into it and it cuts nothing into the halves. Carry the base job's
+    # copies over rather than regenerating them; this job's directory then
+    # stands alone.
+    for name in (
+        "parting_surface.stl",
+        "parting.bin",
+        "core.stl",
+        "core_a.stl",
+        "core_b.stl",
+        "core.bin",
+        "glove_preview.stl",
+    ):
         src = base_dir / name
         if src.exists():
             shutil.copyfile(src, out_dir / name)
+    # The manifest looks the core pieces up by key rather than off disk.
+    for name in ("core", "core_a", "core_b"):
+        if (out_dir / f"{name}.stl").exists():
+            written[name] = str(out_dir / f"{name}.stl")
 
     report(0.97, "encoding previews")
     previews = {
         "half_a": _write_preview(result.half_a, out_dir / "half_a.bin", PREVIEW_FACES),
         "half_b": _write_preview(result.half_b, out_dir / "half_b.bin", PREVIEW_FACES),
     }
+    if (out_dir / "core.bin").exists():
+        previews["core"] = {"copied": True}
 
     report_data = result.report()
     report_data["base_job"] = base_job
@@ -347,7 +371,18 @@ def _parts_manifest(out_dir: Path, written: dict) -> dict:
             "bytes": (out_dir / "report.json").stat().st_size,
         },
     }
+    for name, label in (
+        ("core", "Core (the glove's inner form)"),
+        ("core_a", "Core half A (pulls along +d)"),
+        ("core_b", "Core half B (pulls along -d)"),
+    ):
+        if name in written:
+            parts[f"{name}.stl"] = {
+                "label": label,
+                "bytes": Path(written[name]).stat().st_size,
+            }
     for extra, label in (
+        ("glove_preview.stl", "The glove that will be cast"),
         ("parting_surface.stl", "Parting surface"),
         ("mold_uncut.stl", "Mold before splitting"),
     ):

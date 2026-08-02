@@ -27,6 +27,10 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --key-radius 7 --spout-outer 1
 # or hand it the plan from a previous run, edited
 glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 
+# cast a hollow glove rather than a solid positive: adds a core, inset by the
+# wall thickness, trapped at the cuff when the mold closes
+glovegen mold data/samples/Hand_Child.stl -o out/ --core --core-thickness 2
+
 # or use the web app, where the knobs and holes become editable once the
 # mold is built, and re-applying them does not rebuild it
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
@@ -201,7 +205,79 @@ whose every route back out re-enters the cast, is reported as `skipped` with the
 reason and the rest of the plan is still cut — one bad hand-placed item is not a
 reason to throw away a mold that took a minute to build.
 
-### 6. Verification
+### 6. The core, for a hollow glove
+
+Everything above casts a **solid positive** of the scan. A glove is the gap
+between that surface and the same surface inset by the wall thickness, so
+casting one needs a second printed part — a **core** — sitting inside the cavity
+with `t` of clearance all round. `--core` builds it; without the flag nothing
+below happens.
+
+```
+      ┌────────────┬──────────────────┬────────────┐
+      │  ▓▓▓▓▓▓▓▓  │  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓  │  ▓▓▓▓▓▓▓▓  │  half A  (pulls +d)
+      │  ▓▓▓▓▓▓▓▓  └┬────────────────┤   ▓▓▓▓▓▓▓▓  │
+ ─────┼────────────░│░░░░░░░░░░░░░░░░│░─────────────┼──── parting surface
+      │  ▓▓▓▓▓▓▓▓  ░│░░░ cuff cap ░░░│░  ▓▓▓▓▓▓▓▓  │  half B  (pulls −d)
+      │  ▓▓▓▓▓▓▓▓   └───┬────────┬───┘   ▓▓▓▓▓▓▓▓  │
+      │  ▓▓▓▓▓▓▓▓▓▓▓▓   │        │   ▓▓▓▓▓▓▓▓▓▓▓▓  │
+      └─────────────────┴────────┴─────────────────┘
+                        ▒▒▒▒▒▒▒▒▒▒
+                      ▒▒ inset   ▒▒     ░ glove (annulus, t mm)
+                      ▒▒  body   ▒▒     ▒ core   ▓ mold block
+```
+
+**The inset is the one place this pipeline offsets anything**, and it cannot
+dodge it the way the mold does — an inset surface is not a boolean of the input.
+`manifold3d` has `minkowski_difference`, an exact erosion, but it scales with the
+*product* of the face counts and a 2.6M-triangle scan is hopeless. So the inset
+comes off a distance field: occupancy from `demold.cast_grid` (the same
+per-column crossing model as the direction search, so it is an exact
+inside/outside classification rather than a surface voxelisation), a signed EDT,
+then `Manifold.level_set` at level `t` — marching tetrahedra, manifold by
+construction, which matters because everything downstream is a boolean.
+
+The extracted level carries a systematic bias of about **0.3 × the voxel pitch**,
+measured across six shapes from a flat rotated face to a 10 mm sphere. They agree
+to ±0.05, so it is a property of the extractor and not of curvature, and
+extracting that much shallower cancels it: the wall lands within **0.1 mm** at a
+1 mm pitch. `core_wall_report` then measures what actually came out rather than
+trusting any of this.
+
+The core is two pieces unioned:
+
+- **Inset body** — the cavity eroded by `t`. The cast forms in the gap.
+- **Cuff cap** — the cavity's *own* material beyond the cuff plane, at full size.
+  Because it is cut from the cavity it seals against it, so no cast gets past:
+  that is what leaves the glove **open** at the wrist. The cuff plane sits at
+  least a wall thickness inside the part's extreme — any further out and the cap
+  floats clear of the inset body and the core comes out in two pieces.
+
+**Nothing is cut into the mold for the core.** The cap is taken from the cavity,
+so it is an exact fit in the void the cavity left at that end of the block: the
+halves close around it and it is trapped, located by geometry that was already
+there. Both halves are byte-for-byte what they would have been without a core —
+no pocket, no channel, no fastener, and no way for the core to break the split.
+
+**On getting the core out.** A cast glove is a zero-clearance fit on its former —
+the glove's inner surface *is* the core's surface — so a one-piece core comes off
+by stretching, never by sliding, exactly the flexible-cast assumption the mold
+halves already rest on. There is deliberately no "does the core release" number:
+every way of scoring it bottoms out on that coincidence (booleans across the two
+return slivers; ray columns skimming along them dip in and out of the extracted
+mesh and read as deep re-entrancy), and both scored a plain rod, which slides out
+perfectly, at 8% of the cast. A number that wrong is worse than none.
+`--core-split` is how you replace the assumption with a guarantee: it cuts the
+core on the same parting surface, so each piece lifts away with its own mold half
+and `separation_report` checks it the same way it checks the mold.
+
+The failure mode of an inward offset is not thinness, it is **disappearance** — a
+wall thicker than half the narrowest feature erases that feature. So the report
+carries a component count, taken from `manifold3d`'s `decompose` rather than
+`Trimesh.split`, which reads a boolean result's unwelded coincident vertices as
+component boundaries and calls a single sphere twenty pieces.
+
+### 7. Verification
 
 `validate.separation_report` measures rather than assumes, by sliding the halves
 and intersecting:
@@ -217,6 +293,13 @@ On the hand: `opens: true`, cast interference **27.9 mm³ = 0.004%** of a 708 cm
 cast. The ray-based trapped-volume estimate independently says tens of mm³, so
 the two methods agree. A rigid cast would technically bind on that; a flexible
 silicone cast absorbs it, which is the design assumption.
+
+With `--core` on the same scan the mold's numbers do not move at all —
+`opens: true`, the same 27.9 mm³, the same half volumes to the cm³ — because
+nothing is cut into the halves for the core. It comes out one piece with a
+measured wall of **1.89 mm (1.47–2.12)** against the 2 mm asked for, and the
+cast it leaves is a 118 cm³ hollow glove around a 590 cm³ former, opening
+4.2 mm back from the wrist cut.
 
 #### On "watertight"
 
@@ -242,6 +325,7 @@ never tolerated, a handful of coincident touchings is.
 | Undercut metric | silhouette face area | trapped fin **volume** (mm³), parting-surface-independent |
 | Small undercut islands | merged into neighbours, bridging holes that don't release | reported and measured; flexible-cast assumption made explicit |
 | Keys / spout / vents | scoped, never built | built, with the withdrawal-sweep and groove-geometry constraints handled |
+| Hollow cast | not attempted | `--core`: inset former plus a cuff cap, trapped when the mold closes |
 | Persistence | in-process dict, unenforced TTL, lost on restart | disk-backed store, enforced TTL, restart reaps orphans |
 
 **The "2-part molds don't generalise to hands" conclusion did not reproduce.**
@@ -257,8 +341,12 @@ offset-shelling approach.
 
 ## Known limits
 
-- The mold produces a **solid positive** of the scan. Casting a hollow glove or
-  liner needs a matching core, which is out of scope here.
+- A one-piece core is **peeled off a flexible cast**, not slid out — a glove is a
+  zero-clearance fit on its former. `--core-split` gives a mechanical release
+  instead, at the cost of a seam inside the glove.
+- The core is the only stage that pays for a grid, and the level-set callback is
+  Python: budget tens of seconds on a hand-sized part, tuned with
+  `--core-pitch`. Wall accuracy is bounded by that pitch (~0.1 mm at 1 mm).
 - Residual undercuts are reported, not eliminated. There is no N-part split;
   the design assumes a flexible cast material.
 - A box block around a hand-and-forearm scan is ~4.2 L of plastic. Use
@@ -278,6 +366,7 @@ glovegen/
   demold.py         pull-direction search, per-face undercut heatmap
   parting.py        constrained height field -> parting surface + solid
   mold.py           block, block−part, the split
+  core.py           the inward offset, and the core as a printable part
   features.py       the feature plan: choosing keys/spout/vents, and cutting them
   pipeline.py       orchestration + reporting, and re-cutting an edited plan
   validate.py       solid gating, separation measurement
@@ -287,7 +376,7 @@ server/
   store.py          disk-backed persistence, TTL, orphan reaping
   worker.py         job bodies (prepare | analyze | mold | features), out-of-process
   static/           three.js viewer: live heatmap, then the editable feature plan
-tests/              159 tests
+tests/              194 tests
 ```
 
 ## Deployment
@@ -370,6 +459,10 @@ image), `GLOVEGEN_TTL_HOURS` (24), `GLOVEGEN_MAX_UPLOAD_MB` (400),
 Everything geometric lives in `glovegen/config.py` as dataclasses and is
 accepted as a partial nested dict by the API, so
 `{"block_margin": 12, "parting": {"grid": 500}}` is a valid job config.
+
+`from_dict` builds nested configs by recursing over the dataclass fields rather
+than by naming each one, so a partial dict at any depth works and unknown keys
+are dropped at every level.
 
 Feature sizes are per item rather than per mold, so they live in the plan, not
 in the config — the config's `keys.radius`, `spout.outer_radius` and

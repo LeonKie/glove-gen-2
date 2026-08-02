@@ -183,6 +183,38 @@ def separation_report(
     return out
 
 
+def core_wall_report(
+    cavity: trimesh.Trimesh,
+    body: trimesh.Trimesh,
+    expected: float,
+    *,
+    samples: int = 20_000,
+) -> dict:
+    """How thick the cast glove actually comes out. Measured, not assumed.
+
+    The inset is extracted from a distance field on a finite grid, so the wall it
+    produces is close to the requested thickness but not exactly it. This samples
+    the surface and asks how far each point really is from the cavity.
+
+    Note the argument is the *inset body*, not the finished core. The cuff cap is
+    cut from the cavity, so its outer wall lies exactly on it and measures a wall
+    of zero. That is not glove -- no cast forms past the cuff -- and including it
+    turns this from a measurement into noise.
+    """
+    pts = trimesh.sample.sample_surface(body, int(samples))[0]
+    dist = np.asarray(trimesh.proximity.closest_point(cavity, pts)[1], dtype=np.float64)
+    if len(dist) < 16:
+        return {"expected_mm": round(float(expected), 3), "measured": False}
+    return {
+        "expected_mm": round(float(expected), 3),
+        "measured": True,
+        "min_mm": round(float(np.percentile(dist, 1.0)), 3),
+        "median_mm": round(float(np.median(dist)), 3),
+        "max_mm": round(float(np.percentile(dist, 99.0)), 3),
+        "samples": int(len(dist)),
+    }
+
+
 def assert_solid_enough(mesh: trimesh.Trimesh, name: str, **kwargs) -> trimesh.Trimesh:
     """Raise :class:`SolidError` with an actionable message if ``mesh`` is bad.
 
