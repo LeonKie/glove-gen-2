@@ -191,6 +191,10 @@ def _do_mold(store: Store, job: dict) -> dict:
         "half_a": _write_preview(result.half_a, out_dir / "half_a.bin", PREVIEW_FACES),
         "half_b": _write_preview(result.half_b, out_dir / "half_b.bin", PREVIEW_FACES),
     }
+    if result.core is not None:
+        previews["core"] = _write_preview(
+            result.core, out_dir / "core.bin", PREVIEW_FACES
+        )
     surface = result.mold_result.surface.surface_mesh()
     (out_dir / "parting.bin").write_bytes(
         viewer_format.encode(meshio.decimate(surface, PREVIEW_FACES))
@@ -235,6 +239,15 @@ def _write_base(store: Store, job: dict, result: pipeline.PipelineResult) -> Non
         meshio.save_npz(mold_result.cavity, out_dir / "cavity.npz")
         cavity = "cavity.npz"
 
+    # A core edit is worth caching for exactly the reason a feature edit is: the
+    # erosion is the expensive part of the run and none of it depends on where
+    # the plate's plane sits or how many dowels there are. The block goes with
+    # it because the plate is sliced out of the block, and the halves cannot
+    # stand in -- the plate has to span the cavity opening too.
+    if result.core_body is not None:
+        meshio.save_npz(result.core_body, out_dir / "core_body.npz")
+        meshio.save_npz(mold_result.block, out_dir / "block.npz")
+
     (out_dir / "context.json").write_text(
         json.dumps(
             {
@@ -245,6 +258,10 @@ def _write_base(store: Store, job: dict, result: pipeline.PipelineResult) -> Non
                     [float(v) for v in row] for row in mold_result.local_bounds
                 ],
                 "cavity": cavity,
+                "core": result.core_body is not None,
+                # The sizes the plan's defaults come from, so a re-cut proposes
+                # the same things this run did.
+                "config": job.get("config") or {},
             },
             indent=2,
         )
@@ -269,10 +286,17 @@ def _load_context(store: Store, base_job_id: str) -> features.FeatureContext:
     else:
         cavity = meshio.load_npz(base_dir / ctx_data["cavity"])
 
+    core = block = None
+    if ctx_data.get("core"):
+        core = meshio.load_npz(base_dir / "core_body.npz")
+        block = meshio.load_npz(base_dir / "block.npz")
+
     return features.FeatureContext(
         surface=PartingSurface.load(base_dir / "parting.npz"),
         local_bounds=np.asarray(ctx_data["local_bounds"], dtype=float),
         cavity=cavity,
+        block=block,
+        core=core,
     )
 
 
@@ -291,6 +315,9 @@ def _do_features(store: Store, job: dict) -> dict:
     report(0.03, "loading the built mold")
     ctx = _load_context(store, base_job)
     base_dir = store.job_dir(base_job)
+    base_cfg = MoldConfig.from_dict(
+        json.loads((base_dir / "context.json").read_text()).get("config") or {}
+    )
     half_a = meshio.load_npz(base_dir / "base_half_a.npz")
     half_b = meshio.load_npz(base_dir / "base_half_b.npz")
 
@@ -299,6 +326,7 @@ def _do_features(store: Store, job: dict) -> dict:
         half_b,
         ctx,
         config.get("plan") or {},
+        cfg=base_cfg,
         verify=verify,
         progress=lambda f, msg: report(0.06 + 0.85 * f, msg),
     )
@@ -317,6 +345,10 @@ def _do_features(store: Store, job: dict) -> dict:
         "half_a": _write_preview(result.half_a, out_dir / "half_a.bin", PREVIEW_FACES),
         "half_b": _write_preview(result.half_b, out_dir / "half_b.bin", PREVIEW_FACES),
     }
+    if result.core is not None:
+        previews["core"] = _write_preview(
+            result.core, out_dir / "core.bin", PREVIEW_FACES
+        )
 
     report_data = result.report()
     report_data["base_job"] = base_job
@@ -348,6 +380,8 @@ def _parts_manifest(out_dir: Path, written: dict) -> dict:
         },
     }
     for extra, label in (
+        ("core.stl", "Core, carrier plate and all"),
+        ("dowel_pins.stl", "Dowel pins (or use rod of the same diameter)"),
         ("parting_surface.stl", "Parting surface"),
         ("mold_uncut.stl", "Mold before splitting"),
     ):

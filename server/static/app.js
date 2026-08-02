@@ -17,6 +17,10 @@ const el = {
   margin: $('margin'), marginVal: $('margin-val'),
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
+  optCore: $('opt-core'), coreOptions: $('core-options'),
+  coreWall: $('core-wall'), coreWallVal: $('core-wall-val'),
+  optCarrier: $('opt-carrier'), optTabs: $('opt-tabs'), optDowels: $('opt-dowels'),
+  coreTabs: $('core-tabs'), coreTabsVal: $('core-tabs-val'), rowCoreTabs: $('row-core-tabs'),
   build: $('btn-build'), buildStatus: $('build-status'), buildProgress: $('build-progress'),
   panelFeatures: $('panel-features'), featureList: $('feature-list'),
   resetPlan: $('btn-plan-reset'), optVerify: $('opt-verify'),
@@ -49,6 +53,8 @@ const state = {
   folded: new Set(),    // kinds whose group is collapsed
   uid: 0,               // counter behind hand-placed ids
   pullDirection: [0, 0, 1],
+  pourSpan: null,       // [min, max] of the scan along the pour axis, for the cut slider
+  pourRadius: null,     // and its reach across that axis, for the plate marker
   defaults: null,       // MoldConfig defaults, from /api/status
   paramBounds: null,    // per-kind clamp ranges, from /api/status
 };
@@ -80,7 +86,7 @@ const fill = new THREE.DirectionalLight(0xa8c4e0, 0.6);
 fill.position.set(-1.1, 0.9, -0.6);
 scene.add(fill);
 
-const layers = { part: null, half_a: null, half_b: null, parting: null };
+const layers = { part: null, half_a: null, half_b: null, parting: null, core: null };
 const gizmo = new THREE.Group();
 scene.add(gizmo);
 // Where the knobs and holes are, drawn over whichever layer is showing.
@@ -244,7 +250,7 @@ async function selectMesh(meshId) {
   setLayer('part', buildGeometry(decodeGGM2(buf)));
   frameModel(layers.part.geometry.boundingSphere);
 
-  ['half_a', 'half_b', 'parting'].forEach((k) => disposeLayer(k));
+  ['half_a', 'half_b', 'parting', 'core'].forEach((k) => disposeLayer(k));
   el.layers.querySelectorAll('button').forEach((b) => {
     b.disabled = b.dataset.layer !== 'part';
   });
@@ -438,11 +444,44 @@ const PARAM_UI = {
     { name: 'outer_radius', label: 'outer r', unit: 'mm', min: 0.5, max: 80, step: 0.5 },
   ],
   vent: [{ name: 'radius', label: 'radius', unit: 'mm', min: 0.2, max: 20, step: 0.1 }],
+  plate: [{ name: 'thickness', label: 'thickness', unit: 'mm', min: 2, max: 60, step: 0.5 }],
+  core_tab: [
+    { name: 'radius', label: 'radius', unit: 'mm', min: 0.5, max: 20, step: 0.1 },
+    { name: 'clearance', label: 'fit', unit: 'mm', min: 0, max: 3, step: 0.05 },
+  ],
+  dowel: [
+    { name: 'radius', label: 'pin r', unit: 'mm', min: 1, max: 20, step: 0.1 },
+    { name: 'engagement', label: 'grip', unit: 'mm', min: 1, max: 60, step: 0.5 },
+    { name: 'clearance', label: 'fit', unit: 'mm', min: 0, max: 2, step: 0.05 },
+  ],
+  screw: [
+    { name: 'radius', label: 'pilot r', unit: 'mm', min: 0.5, max: 10, step: 0.1 },
+    { name: 'depth', label: 'depth', unit: 'mm', min: 2, max: 60, step: 0.5 },
+    { name: 'clearance', label: 'fit', unit: 'mm', min: 0, max: 3, step: 0.05 },
+  ],
+  port: [
+    { name: 'inner_radius', label: 'inner r', unit: 'mm', min: 0.5, max: 30, step: 0.5 },
+    { name: 'outer_radius', label: 'outer r', unit: 'mm', min: 1, max: 60, step: 0.5 },
+  ],
 };
-const KIND_ORDER = ['key', 'spout', 'vent'];
-const KIND_LABEL = { key: 'Knob', spout: 'Spout', vent: 'Vent' };
-const KIND_PLURAL = { key: 'Knobs', spout: 'Spouts', vent: 'Vents' };
-const KIND_COLOUR = { key: 0x52a8ff, spout: 0x46b07a, vent: 0xe0a23c };
+// Mirrors features.KINDS: the plate leads because it is the plane cut, and
+// everything in the core group after it stands on the face that cut leaves.
+const KIND_ORDER = ['plate', 'key', 'spout', 'vent', 'core_tab', 'dowel', 'screw', 'port'];
+const CORE_KINDS = new Set(['plate', 'core_tab', 'dowel', 'screw', 'port']);
+const KIND_LABEL = {
+  key: 'Knob', spout: 'Spout', vent: 'Vent',
+  plate: 'Plate', core_tab: 'Tab', dowel: 'Dowel', screw: 'Screw', port: 'Port',
+};
+const KIND_PLURAL = {
+  key: 'Knobs', spout: 'Spouts', vent: 'Vents',
+  plate: 'Carrier plate', core_tab: 'Seam tabs', dowel: 'Seam dowels',
+  screw: 'Plate screws', port: 'Pour port',
+};
+const KIND_COLOUR = {
+  key: 0x52a8ff, spout: 0x46b07a, vent: 0xe0a23c,
+  plate: 0xb07ad6, core_tab: 0x3fc4c4, dowel: 0xff8a5c, screw: 0x9aa7b6,
+  port: 0x6fd08c,
+};
 
 const label1 = (kind) => KIND_LABEL[kind] || kind;
 const labelN = (kind) => KIND_PLURAL[kind] || `${kind}s`;
@@ -464,6 +503,7 @@ const fmt = (v) => String(Number(v.toFixed(3)));
 function defaultParams(kind) {
   const d = state.defaults || {};
   const k = d.keys || {}, s = d.spout || {}, v = d.vents || {};
+  const c = d.carrier || {}, t = d.core_tabs || {};
   if (kind === 'key') {
     return {
       radius: k.radius ?? 5, height: k.height ?? 4,
@@ -472,6 +512,27 @@ function defaultParams(kind) {
   }
   if (kind === 'spout') {
     return { inner_radius: s.inner_radius ?? 4, outer_radius: s.outer_radius ?? 9 };
+  }
+  if (kind === 'plate') return { thickness: c.plate_thickness ?? 10 };
+  if (kind === 'core_tab') return { radius: t.radius ?? 3, clearance: t.clearance ?? 0.2 };
+  if (kind === 'dowel') {
+    const w = d.core_dowels || {};
+    return {
+      radius: w.radius ?? 3, engagement: w.engagement ?? 8,
+      clearance: w.clearance ?? 0.2,
+    };
+  }
+  if (kind === 'screw') {
+    return {
+      radius: c.screw_radius ?? 2, depth: c.screw_depth ?? 14,
+      clearance: c.screw_clearance ?? 0.4,
+    };
+  }
+  if (kind === 'port') {
+    return {
+      inner_radius: c.port_inner_radius ?? 2.5,
+      outer_radius: c.port_outer_radius ?? 9,
+    };
   }
   return { radius: v.radius ?? 0.9 };
 }
@@ -499,9 +560,48 @@ async function automaticPlan(job) {
   }
 }
 
+/** The range the cut slider spans: the scan along the pour axis, plus the wall
+ *  margin either side, because the block reaches that far and the plane may
+ *  legitimately sit in it. */
+function measurePourSpan() {
+  const geom = layers.part?.geometry;
+  if (!geom) { state.pourSpan = null; return; }
+  geom.computeBoundingBox();
+  const box = geom.boundingBox;
+  const p = pourAxis();
+  let lo = Infinity, hi = -Infinity;
+  for (const x of [box.min.x, box.max.x]) {
+    for (const y of [box.min.y, box.max.y]) {
+      for (const z of [box.min.z, box.max.z]) {
+        const at = new THREE.Vector3(x, y, z).dot(p);
+        lo = Math.min(lo, at); hi = Math.max(hi, at);
+      }
+    }
+  }
+  const pad = Number(el.margin.value) || 10;
+  state.pourSpan = [Math.round(lo - pad), Math.round(hi + pad)];
+
+  // How wide to draw the plate: the scan's reach *across* the pour axis, not
+  // its bounding sphere. On anything long and thin -- which is every hand --
+  // the sphere is twice the cross-section and the marker swamps the viewport.
+  const mid = new THREE.Vector3().addVectors(box.min, box.max).multiplyScalar(0.5);
+  let across = 0;
+  for (const x of [box.min.x, box.max.x]) {
+    for (const y of [box.min.y, box.max.y]) {
+      for (const z of [box.min.z, box.max.z]) {
+        const v = new THREE.Vector3(x, y, z).sub(mid);
+        across = Math.max(across, v.clone().addScaledVector(p, -v.dot(p)).length());
+      }
+    }
+  }
+  state.pourRadius = across + pad;
+}
+
 function setPlan(plan, { statuses = null } = {}) {
   state.plan = clonePlan(plan);
   state.featureStatus = statuses || {};
+  measurePourSpan();
+  snapToCut();
   // Hand-placed ids carry a counter. A plan can arrive from a job built in an
   // earlier session, so pull the counter past whatever is already in it rather
   // than minting an id the plan already uses.
@@ -590,6 +690,62 @@ function ctlHtml(spec, kind, id, { value, mixed }) {
     </div>`;
 }
 
+/** How far along the pour axis a point sits, and the range that makes sense.
+ *
+ *  The plate is not sized into place like a knob, it is *positioned*: the one
+ *  number that matters is where its plane cuts, so that gets its own slider
+ *  rather than being buried in a click-to-move.
+ */
+function pourAxis() {
+  return new THREE.Vector3(...(state.plan?.pour_axis || [0, 0, 1])).normalize();
+}
+
+function planeOffset(item) {
+  return new THREE.Vector3(...item.position).dot(pourAxis());
+}
+
+/** Where the mold is cut, or null if no plate is cutting it. */
+function cutPlane() {
+  const plate = itemsOfKind('plate').find((i) => i.enabled);
+  return plate ? planeOffset(plate) : null;
+}
+
+// Everything that hangs off the plate lives on the plate's plane. The cut
+// decides how far along the pour axis they sit; a click only ever chooses
+// where *across* it they go.
+const ON_PLANE = new Set(['screw', 'port']);
+
+/** Slide the items that belong on the cut onto it.
+ *
+ *  Without this a dowel sits wherever the click landed on the parting surface
+ *  and its marker hangs there in mid-air, pointing along the pour axis and
+ *  attached to nothing you can see. The cut is applied server-side either way;
+ *  drawing it anywhere else is just a lie about where the dowel is.
+ */
+function snapToCut() {
+  const at = cutPlane();
+  if (at == null) return;
+  for (const item of state.plan?.items || []) {
+    if (ON_PLANE.has(item.kind)) setPlane(item, at);
+  }
+}
+
+function planeHtml(item) {
+  const span = state.pourSpan;
+  if (!span) return '';
+  const at = planeOffset(item);
+  const [lo, hi] = span;
+  return `
+    <div class="ctl plane" data-plane="${esc(item.id)}">
+      <span class="lbl">cut at</span>
+      <input type="range" min="${fmt(lo)}" max="${fmt(hi)}" step="0.5" value="${fmt(at)}"
+             data-plane="${esc(item.id)}" aria-label="cut plane">
+      <input type="number" min="${fmt(lo)}" max="${fmt(hi)}" step="0.5" value="${fmt(at)}"
+             data-plane="${esc(item.id)}" aria-label="cut plane">
+      <span class="unit">mm</span>
+    </div>`;
+}
+
 /** A row. The selected one is the one being worked on, so it is also the one
  *  that opens up to size that item on its own. */
 function itemHtml(item, n) {
@@ -605,6 +761,7 @@ function itemHtml(item, n) {
   const own = open ? `
     <div class="feat-params">
       <div class="ctl-cap">this ${label1(item.kind).toLowerCase()} only</div>
+      ${item.kind === 'plate' ? planeHtml(item) : ''}
       ${specsFor(item.kind).map((spec) =>
         ctlHtml(spec, item.kind, item.id, { value: item.params?.[spec.name], mixed: false })).join('')}
     </div>` : '';
@@ -621,6 +778,46 @@ function itemHtml(item, n) {
       ${own}
       ${st.status === 'skipped' ? `<div class="feat-why">skipped — ${esc(st.reason)}</div>` : ''}
     </div>`;
+}
+
+// What each core group *is*. The mold features are self-explanatory from their
+// names; these are not, and the shapes in the viewport cannot say it either --
+// a dowel and a screw are both pins under the plate, and what separates them is
+// which side of the seam they land on.
+const GROUP_NOTE = {
+  plate: 'Cuts the mold on a plane and caps what is left. Everything past the '
+    + 'plane is thrown away — half A, half B and the core alike — so the '
+    + 'glove’s rim is the cut. Select the row to move it.',
+  core_tab: 'A post from the core out past the cast into mold that is solid on '
+    + 'both sides of the parting face, where closing the halves pinch it. Click '
+    + 'where it should be gripped; it reaches back to the nearest core. No extra '
+    + 'part, but it stays on the core, so the glove has to stretch off it.',
+  dowel: 'A tab turned inside out: the same line through the core, half A and '
+    + 'half B, but bored away rather than added, so a loose rod dropped in from '
+    + 'outside the block locks all three together. Pull the pin before opening '
+    + 'the mold — the core then leaves the glove cleanly, which is the whole '
+    + 'advantage over a tab. Printed as dowel_pins.stl.',
+  screw: 'Clamps the plate down, because a core floats rather than sinks. Each '
+    + 'has to land wholly inside one half: on the seam it would jack the halves '
+    + 'apart instead of holding them shut.',
+  port: 'The way in once the plate seals the cast: a funnel through it down to '
+    + 'the ring of glove at the cut. Only a wall thick, so it necks down.',
+};
+
+/** Something true about the group as a whole that a row cannot say.
+ *
+ *  A plate with no dowels is the case worth catching: it caps the mold and
+ *  seals the cast in, and it will look perfectly finished, but nothing locates
+ *  it — which is the entire reason for having one.
+ */
+function groupWarning(kind) {
+  if (kind !== 'plate') return '';
+  const on = (k) => itemsOfKind(k).some((i) => i.enabled);
+  if (!on('plate') || on('dowel') || on('core_tab')) return '';
+  return `<p class="grp-warn">The plate closes the mold, but nothing holds the
+    core still inside it — so the wall ends up whatever thickness the core
+    drifts to. Add seam dowels or tabs below, or tick “Propose” for them above
+    and build again.</p>`;
 }
 
 function groupHtml(kind) {
@@ -641,13 +838,17 @@ function groupHtml(kind) {
         ? `<button class="ghost" data-fold="${esc(kind)}" title="${folded ? 'show' : 'hide'}">${folded ? '▸' : '▾'}</button>`
         : ''}
     </div>`;
+  const note = GROUP_NOTE[kind] ? `<p class="grp-note">${esc(GROUP_NOTE[kind])}</p>` : '';
   if (!items.length) {
-    return `<div class="grp">${head}<p class="empty">none — “+ add” places one by hand</p></div>`;
+    return `<div class="grp">${head}${note}` +
+      '<p class="empty">none — “+ add” places one by hand</p></div>';
   }
   return `
     <div class="grp${folded ? ' folded' : ''}">
       ${head}
       <div class="grp-body">
+        ${note}
+        ${groupWarning(kind)}
         <div class="ctl-cap">${items.length > 1 ? `size · all ${items.length} ${labelN(kind).toLowerCase()}` : 'size'}</div>
         ${specsFor(kind).map((spec) => ctlHtml(spec, kind, null, groupValue(items, spec.name))).join('')}
         <div class="items">${items.map((item, i) => itemHtml(item, i + 1)).join('')}</div>
@@ -699,8 +900,34 @@ function refreshControls(kind, name, except) {
   }
 }
 
+/** Slide the cut plane along the pour axis, keeping the point on the part. */
+function setPlane(item, offset) {
+  const p = pourAxis();
+  const pos = new THREE.Vector3(...item.position);
+  pos.addScaledVector(p, offset - pos.dot(p));
+  item.position = [pos.x, pos.y, pos.z];
+  delete state.featureStatus[item.id];
+}
+
 el.featureList.addEventListener('input', (e) => {
   const t = e.target;
+  if (t.dataset.plane) {
+    if (t.value === '') return;
+    const item = itemById(t.dataset.plane);
+    const at = Number(t.value);
+    if (!item || !Number.isFinite(at)) return;
+    setPlane(item, at);
+    // The dowels, screws and port stand on this plane; leaving them behind
+    // would show them detached from the plate they belong to.
+    snapToCut();
+    for (const other of el.featureList.querySelectorAll(
+      `[data-plane="${CSS.escape(t.dataset.plane)}"]`)) {
+      if (other !== t && other.tagName === 'INPUT') other.value = fmt(at);
+    }
+    drawMarkers();
+    planDirty('cut moved — re-apply to cut the mold there');
+    return;
+  }
   const name = t.dataset.param;
   if (!name || t.value === '') return;  // an emptied number field is mid-edit
   const raw = Number(t.value);
@@ -782,16 +1009,36 @@ function selectItem(id, { reveal = false } = {}) {
 
 // Knobs and spouts are both centred on the parting surface, so they are placed
 // against it; a vent starts at the cast, so it is placed against the scan.
-const PLACE_ON = { key: 'parting', spout: 'parting', vent: 'part' };
+// Knobs and spouts are both centred on the parting surface, so they are placed
+// against it; a vent starts at the cast, so it is placed against the scan. A
+// dowel and a tab are on the seam too. A screw and the port are on the plate's
+// face, so they are placed against the core, which is the body the plate
+// belongs to. The plate itself only needs a height along the pour axis, so
+// anywhere on the scan will do.
+const PLACE_ON = {
+  key: 'parting', spout: 'parting', vent: 'part',
+  plate: 'part', core_tab: 'parting', dowel: 'parting',
+  screw: 'core', port: 'core',
+};
 const PLACE_HINT = {
   key: 'Click the parting surface to drop a knob · Esc to cancel',
   spout: 'Click the parting surface where the mold should be filled · Esc to cancel',
   vent: 'Click the scan where air would be trapped · Esc to cancel',
+  plate: 'Click the scan where the mold should be cut — everything past it goes · Esc to cancel',
+  core_tab: 'Click the parting surface where a tab should be pinched · Esc to cancel',
+  dowel: 'Click the parting surface where the pin should cross it · Esc to cancel',
+  screw: 'Click the plate, clear of the seam · Esc to cancel',
+  port: 'Click the plate over the ring of cast · Esc to cancel',
 };
 const MOVE_HINT = {
   key: 'Click the parting surface to move this knob · Esc to cancel',
   spout: 'Click the parting surface to move the spout · Esc to cancel',
   vent: 'Click the scan to move this vent · Esc to cancel',
+  plate: 'Click the scan to move the cut · Esc to cancel',
+  core_tab: 'Click the parting surface to move this tab · Esc to cancel',
+  dowel: 'Click the parting surface to move this pin · Esc to cancel',
+  screw: 'Click the plate to move this screw · Esc to cancel',
+  port: 'Click the plate to move the port · Esc to cancel',
 };
 
 function setPlacing(kind, moveId = null) {
@@ -825,6 +1072,7 @@ function addItem(kind, point) {
     params: defaultParams(kind),
     note: 'placed by hand',
   });
+  snapToCut();
   state.selected = id;
   renderPlan();
   planDirty(`${label1(kind).toLowerCase()} placed — re-apply to cut it`);
@@ -837,6 +1085,7 @@ function moveItem(id, point) {
   // Its own position is the only thing that moved; a knob the last run refused
   // may well fit here, so the stale verdict is dropped rather than shown again.
   delete state.featureStatus[id];
+  snapToCut();
   state.selected = id;
   renderPlan();
   planDirty(`${label1(item.kind).toLowerCase()} moved — re-apply to cut it there`);
@@ -885,6 +1134,29 @@ addEventListener('keydown', (e) => { if (e.key === 'Escape') setPlacing(null); }
 
 /* ---- markers ---- */
 
+/** A cylinder spanning two points: for anything whose direction is a result
+ *  rather than an input, like a tab reaching from the core out to its anchor. */
+function rodMarker(item, st, from, to, radius) {
+  const span = new THREE.Vector3().subVectors(to, from);
+  const len = Math.max(span.length(), 0.5);
+  const chosen = state.selected === item.id;
+  const mesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius, radius, len, 16),
+    new THREE.MeshBasicMaterial({
+      color: st.status === 'skipped' ? 0xe05c4b : KIND_COLOUR[item.kind],
+      transparent: true,
+      opacity: chosen ? 0.9 : item.enabled ? 0.6 : 0.15,
+      depthWrite: false,
+      depthTest: !chosen,
+    }),
+  );
+  mesh.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0), span.clone().normalize());
+  mesh.position.copy(from).addScaledVector(span, 0.5);
+  mesh.userData.id = item.id;
+  return mesh;
+}
+
 function drawMarkers() {
   for (const m of markers.children) { m.geometry.dispose(); m.material.dispose(); }
   markers.clear();
@@ -894,30 +1166,74 @@ function drawMarkers() {
   const pour = new THREE.Vector3(...(state.plan.pour_axis || [0, 0, 1])).normalize();
   const up = new THREE.Vector3(0, 1, 0);
 
+  // The plate spans the block, which the markers do not know about, so the
+  // scan's reach across the pour axis plus the wall margin stands in. It is a
+  // schematic of where the cut is, not a rendering of the plate.
+  const reach = state.pourRadius || 40;
+
   for (const item of state.plan.items) {
     const st = state.featureStatus[item.id] || {};
     const p = item.params;
     const chosen = state.selected === item.id;
-    let geom, axis = pull;
+    let geom, axis = pull, offset = 0;
     if (item.kind === 'key') {
       geom = new THREE.CylinderGeometry(p.radius, p.radius, Math.max(p.height, 1), 20);
     } else if (item.kind === 'spout') {
       geom = new THREE.ConeGeometry(p.outer_radius, p.outer_radius * 2.2, 24);
       axis = pour;
+    } else if (item.kind === 'port') {
+      geom = new THREE.ConeGeometry(p.outer_radius, p.outer_radius * 1.8, 24);
+      axis = pour;
+    } else if (item.kind === 'plate') {
+      // A disc across the whole mold at the cut, sitting on the plane rather
+      // than centred on it, because that is where the plate actually is: the
+      // face it caps is the plane, and everything past it is gone.
+      geom = new THREE.CylinderGeometry(reach, reach, Math.max(p.thickness, 1), 40);
+      axis = pour;
+      offset = Math.max(p.thickness, 1) / 2;
+    } else if (item.kind === 'screw') {
+      // Screws go *down* from the plate into the mold, so the marker does too.
+      geom = new THREE.CylinderGeometry(p.radius, p.radius, Math.max(p.depth, 1), 18);
+      axis = pour;
+      offset = -Math.max(p.depth, 1) / 2;
+    } else if (item.kind === 'core_tab') {
+      // Only the anchor is in the plan; which way the tab runs is worked out
+      // against the core when it is cut. Once it has been, the cut says where
+      // it gripped, and the tab can be drawn as the post it is instead of a
+      // bead floating on the seam.
+      const grip = st.detail?.core_world;
+      if (grip) {
+        markers.add(rodMarker(item, st, new THREE.Vector3(...grip),
+          new THREE.Vector3(...item.position), Math.max(p.radius, 1)));
+        continue;
+      }
+      geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 16, 12);
+    } else if (item.kind === 'dowel') {
+      // The pin runs from inside the core out to daylight. Both ends come back
+      // from the cut, so before one has happened all that can honestly be shown
+      // is where it crosses the seam.
+      const d = st.detail;
+      if (d?.core_world && d?.exit_world) {
+        markers.add(rodMarker(item, st, new THREE.Vector3(...d.core_world),
+          new THREE.Vector3(...d.exit_world), Math.max(p.radius, 1)));
+        continue;
+      }
+      geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 16, 12);
     } else {
       geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 14, 10);
     }
+    const faint = item.kind === 'plate';
     const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
       color: st.status === 'skipped' ? 0xe05c4b : KIND_COLOUR[item.kind],
       transparent: true,
-      opacity: chosen ? 0.9 : item.enabled ? 0.55 : 0.15,
+      opacity: (chosen ? 0.9 : item.enabled ? 0.55 : 0.15) * (faint ? 0.5 : 1),
       depthWrite: false,
       // The selected one is the one being talked about, so it is drawn through
       // the mold rather than lost inside it.
       depthTest: !chosen,
     }));
     mesh.quaternion.setFromUnitVectors(up, axis);
-    mesh.position.set(...item.position);
+    mesh.position.set(...item.position).addScaledVector(axis, offset);
     mesh.userData.id = item.id;
     markers.add(mesh);
   }
@@ -1006,6 +1322,20 @@ function pollJob(jobId, { onProgress, onDone, onFail }) {
   }, 700);
 }
 
+/* Seed the core controls from the server's own defaults, so the wall the UI
+ * offers is the wall the CLI would pick rather than a number duplicated here. */
+function adoptCoreDefaults(defaults) {
+  const core = defaults?.core, tabs = defaults?.core_tabs;
+  if (core?.wall) {
+    el.coreWall.value = core.wall;
+    el.coreWallVal.textContent = `${Number(core.wall).toFixed(1)} mm`;
+  }
+  if (tabs?.count) {
+    el.coreTabs.value = tabs.count;
+    el.coreTabsVal.textContent = String(tabs.count);
+  }
+}
+
 function moldConfig() {
   return {
     block_margin: Number(el.margin.value),
@@ -1014,6 +1344,10 @@ function moldConfig() {
     keys: { enabled: el.optKeys.checked },
     spout: { enabled: el.optSpout.checked },
     vents: { enabled: el.optVents.checked },
+    core: { enabled: el.optCore.checked, wall: Number(el.coreWall.value) },
+    carrier: { enabled: el.optCarrier.checked },
+    core_dowels: { enabled: el.optDowels.checked },
+    core_tabs: { enabled: el.optTabs.checked, count: Number(el.coreTabs.value) },
   };
 }
 
@@ -1137,7 +1471,16 @@ async function showResult(job) {
   }
   const skipped = (feat.items || []).filter((i) => i.status === 'skipped').length;
   if (skipped) rows.push(['not placed', skipped, 'bad']);
+  rows.push(...coreRows(r.core));
   statsTable(el.resultStats, rows);
+
+  const hasCore = Boolean(r.core);
+  if (!hasCore) {
+    // Loading a plain job from history after a core one must not leave the
+    // previous core on screen as if it belonged to this mold.
+    disposeLayer('core');
+    el.layers.querySelector('[data-layer="core"]').disabled = true;
+  }
 
   el.downloads.innerHTML = Object.entries(job.parts || {})
     .map(([name, meta]) =>
@@ -1146,7 +1489,12 @@ async function showResult(job) {
     .join('');
   el.panelResult.hidden = false;
 
-  for (const which of ['half_a', 'half_b', 'parting']) {
+  // Only ask for core.bin when the report says there is one. Fetching it
+  // speculatively works — the catch below swallows it — but leaves a 404 in
+  // the console on every ordinary build for someone to chase later.
+  const previews = ['half_a', 'half_b', 'parting'];
+  if (hasCore) previews.push('core');
+  for (const which of previews) {
     try {
       const res = await fetch(`/api/jobs/${job.id}/preview/${which}.bin`);
       if (!res.ok) throw new Error(res.statusText);
@@ -1156,6 +1504,55 @@ async function showResult(job) {
     } catch { /* preview is optional */ }
   }
   showLayer('half_a');
+}
+
+/* What a core run adds to the result table. Everything here is measured
+ * rather than requested: the wall sampled off the core against the cavity, the
+ * core's release from both halves, and the tab volume the cast has to stretch
+ * over on its way off. */
+function coreRows(core) {
+  if (!core) return [];
+  const rows = [];
+  const wall = core.wall;
+  if (wall?.median_mm != null) {
+    const thin = wall.under_90pct_fraction > 0.001;
+    rows.push(
+      ['wall (median)', `${wall.median_mm.toFixed(2)} of ${wall.target_mm.toFixed(2)} mm`],
+      ['wall (thinnest)', `${wall.min_mm.toFixed(2)} mm`, thin ? 'warn' : 'ok'],
+    );
+    if (thin) {
+      rows.push(['glove under 90% wall', `${(wall.under_90pct_fraction * 100).toFixed(1)}%`, 'warn']);
+    }
+  }
+  if (core.release) {
+    rows.push(['core comes out', core.release.releases ? 'yes' : 'NO',
+      core.release.releases ? 'ok' : 'bad']);
+  }
+  if (core.plate) {
+    const screws = (core.screws || []).length;
+    rows.push(
+      ['cut at', `${core.plate.plane_offset_mm.toFixed(0)} mm along the pour axis`],
+      ['discarded by the cut', `${core.plate.discarded_cm3.toFixed(0)} cm³`],
+      ['plate', `${core.plate.thickness_mm.toFixed(1)} mm · ${screws} screws`],
+    );
+  }
+  if (core.pieces > 1) {
+    // A bore across the root of a tab does not weaken it, it cuts it off.
+    rows.push(['core is in pieces', `${core.pieces} — a bore has severed something`, 'bad']);
+  }
+  const dowels = (core.dowels || []).length;
+  if (dowels) {
+    const pin = core.dowels[0].pin_diameter_mm;
+    rows.push(['seam dowels', `${dowels} · ⌀${pin.toFixed(1)} mm pins`]);
+  }
+  const tabs = (core.core_tabs || []).length;
+  if (tabs) {
+    rows.push(['seam tabs', tabs]);
+    // The one cost of a tab, and the number that decides whether a given cast
+    // material tolerates it or tears on it.
+    rows.push(['cast stretches over', `${(core.tab_through_wall_mm3 ?? 0).toFixed(0)} mm³`, 'warn']);
+  }
+  return rows;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1208,6 +1605,12 @@ for (const slider of [el.az, el.el]) {
 }
 el.margin.addEventListener('input', () => { el.marginVal.textContent = `${el.margin.value} mm`; });
 el.grid.addEventListener('input', () => { el.gridVal.textContent = el.grid.value; });
+el.coreWall.addEventListener('input', () => {
+  el.coreWallVal.textContent = `${Number(el.coreWall.value).toFixed(1)} mm`;
+});
+el.coreTabs.addEventListener('input', () => { el.coreTabsVal.textContent = el.coreTabs.value; });
+el.optCore.addEventListener('change', () => { el.coreOptions.hidden = !el.optCore.checked; });
+el.optTabs.addEventListener('change', () => { el.rowCoreTabs.hidden = !el.optTabs.checked; });
 
 el.layers.querySelectorAll('button').forEach((b) => {
   b.onclick = () => !b.disabled && showLayer(b.dataset.layer);
@@ -1224,6 +1627,7 @@ el.layers.querySelectorAll('button').forEach((b) => {
     const s = await api('/api/status');
     state.defaults = s.defaults;
     adoptParamBounds(s.feature_params);
+    adoptCoreDefaults(s.defaults);
     el.storeUsage.textContent =
       `${s.storage.meshes} mesh · ${(s.storage.bytes / 1e6).toFixed(0)} MB · ttl ${s.storage.ttl_hours}h`;
   } catch { /* status is cosmetic */ }

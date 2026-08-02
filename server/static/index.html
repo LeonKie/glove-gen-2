@@ -74,6 +74,48 @@
         <label><input type="checkbox" id="opt-spout" checked> Propose pour spout</label>
         <label><input type="checkbox" id="opt-vents" checked> Propose vents</label>
       </div>
+
+      <div class="subpanel">
+        <label class="lead"><input type="checkbox" id="opt-core"> Cast a hollow glove</label>
+        <p class="hint">
+          Without this the mold casts a <b>solid</b> positive. A glove is a wall,
+          so it needs a core inside the cavity — and a core left floating there
+          gives you the wall thickness wherever it happens to drift to.
+        </p>
+        <div id="core-options" hidden>
+          <div class="row">
+            <label for="core-wall">Glove wall <span class="val" id="core-wall-val">2.5 mm</span></label>
+            <input type="range" id="core-wall" min="0.8" max="8" step="0.1" value="2.5">
+          </div>
+          <div class="row checks">
+            <label>
+              <input type="checkbox" id="opt-carrier">
+              Propose a carrier plate
+            </label>
+            <label>
+              <input type="checkbox" id="opt-dowels">
+              Propose seam dowels
+            </label>
+            <label>
+              <input type="checkbox" id="opt-tabs">
+              Propose seam tabs
+            </label>
+          </div>
+          <div class="row" id="row-core-tabs" hidden>
+            <label for="core-tabs">Seam tabs <span class="val" id="core-tabs-val">4</span></label>
+            <input type="range" id="core-tabs" min="1" max="8" step="1" value="4">
+          </div>
+          <p class="hint">
+            A plate <b>cuts the mold</b> on a plane through the core and throws
+            away everything past it — half A, half B and the core alike — then
+            caps what is left. Dowels bore through all three for a loose pin
+            that locks them together; tabs do the same job with a post moulded
+            onto the core instead, and no extra part. All of them become rows
+            below, where the cut can be moved.
+          </p>
+        </div>
+      </div>
+
       <button class="primary big" id="btn-build">Build mold</button>
       <div id="build-status" class="status" hidden></div>
       <div id="build-progress" class="progress" hidden><div class="bar"></div></div>
@@ -116,6 +158,7 @@
       <button data-layer="half_a" disabled>Half A</button>
       <button data-layer="half_b" disabled>Half B</button>
       <button data-layer="parting" disabled>Parting</button>
+      <button data-layer="core" disabled>Core</button>
     </div>
     <div id="legend" hidden>
       <span class="swatch ok"></span> releases

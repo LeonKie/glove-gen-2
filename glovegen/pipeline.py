@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+from . import core as core_mod
 from . import demold, features, meshio, mold, validate
 from .config import MoldConfig
 from .features import FeatureReport
@@ -25,6 +26,7 @@ STAGES = (
     "cavity",
     "split",
     "features",
+    "core",
     "verify",
 )
 
@@ -40,6 +42,16 @@ class PipelineResult:
     direction_score: demold.DirectionScore | None
     separation: dict
     feature_plan: features.FeaturePlan | None = None
+    # Only built when a core was asked for: the third printed body, plate and
+    # all, plus what was measured about it.
+    core: trimesh.Trimesh | None = None
+    core_report: dict = field(default_factory=dict)
+    # The loose dowel pins, if any were bored for.
+    pins: trimesh.Trimesh | None = None
+    # The eroded body before the plan touched it. Cached rather than rebuilt:
+    # the erosion is the expensive part of a core run and depends on nothing the
+    # plan decides, so an edited plan can be re-cut from it.
+    core_body: trimesh.Trimesh | None = None
     timings: dict = field(default_factory=dict)
 
     def report(self) -> dict:
@@ -67,6 +79,9 @@ class PipelineResult:
         }
         if self.direction_score is not None:
             out["demold"] = self.direction_score.as_dict()
+        if self.core is not None:
+            out["core"] = self.core_report
+            out["halves"]["core"] = meshio.mesh_stats(self.core)
         return out
 
     def write(self, out_dir: str | Path, *, extras: bool = True) -> dict:
@@ -77,6 +92,10 @@ class PipelineResult:
             "half_a": str(meshio.export(self.half_a, out_dir / "mold_half_a.stl")),
             "half_b": str(meshio.export(self.half_b, out_dir / "mold_half_b.stl")),
         }
+        if self.core is not None:
+            written["core"] = str(meshio.export(self.core, out_dir / "core.stl"))
+        if self.pins is not None:
+            written["pins"] = str(meshio.export(self.pins, out_dir / "dowel_pins.stl"))
         if extras:
             written["parting_surface"] = str(
                 meshio.export(
@@ -158,30 +177,54 @@ def run(
     timings.update(mold_result.timings)
     timings["mold_total"] = time.time() - t0
 
+    # The core is built before the plan, not after it: the plate, the dowels and
+    # the tabs are plan items like any other, and they need something to attach
+    # to before they can be placed. The erosion is the expensive part and it
+    # depends on nothing the plan decides, which is what lets an edited plan be
+    # re-cut later without paying for it again.
+    core_body = None
+    if cfg.core.enabled:
+        report(0.70, f"eroding the part by {cfg.core.wall} mm")
+        t0 = time.time()
+        core_body = core_mod.build_core_body(part, cfg)
+        timings["core_erode"] = time.time() - t0
+        log.info(
+            "core body: %d faces, %.1f cm3 (part %.1f cm3)",
+            len(core_body.faces),
+            core_body.volume / 1000.0,
+            part.volume / 1000.0,
+        )
+
     t0 = time.time()
-    ctx = features.FeatureContext.from_mold(mold_result)
+    ctx = features.FeatureContext.from_mold(mold_result, core=core_body)
     if plan is None:
         report(0.74, "planning features")
         plan = features.plan_features(ctx, cfg)
-    else:
-        plan = features.FeaturePlan.from_dict(plan)
-    half_a, half_b, feat = features.apply_plan(
+    plan = features.FeaturePlan.from_dict(plan).normalised(cfg)
+    bodies, feat = features.apply_plan(
         mold_result.half_a,
         mold_result.half_b,
         ctx,
         plan,
         cfg=cfg,
-        progress=lambda f, msg: report(0.76 + 0.18 * f, msg),
+        progress=lambda f, msg: report(0.76 + 0.16 * f, msg),
     )
+    half_a, half_b, core_mesh = bodies
+    pins = bodies.pins
     timings["features"] = time.time() - t0
     validate.assert_solid_enough(half_a, "half A (with features)")
     validate.assert_solid_enough(half_b, "half B (with features)")
 
+    core_report = dict(feat.core)
     separation: dict = {}
     if verify:
-        report(0.95, "verifying the mold opens")
+        report(0.94, "verifying the mold opens")
         t0 = time.time()
         separation = validate.separation_report(half_a, half_b, part, d)
+        if core_mesh is not None:
+            core_report["release"] = core_mod.release_report(
+                core_mesh, half_a, half_b, d
+            )
         timings["verify"] = time.time() - t0
         if not separation.get("opens", False):
             log.error("mold halves do not separate: %s", separation)
@@ -196,7 +239,11 @@ def run(
         feature_report=feat,
         direction_score=score,
         separation=separation,
-        feature_plan=features.FeaturePlan.from_dict(plan).normalised(cfg),
+        feature_plan=plan,
+        core=core_mesh,
+        core_report=core_report,
+        pins=pins,
+        core_body=core_body,
         timings=timings,
     )
 
@@ -211,11 +258,14 @@ class FeatureResult:
     plan: features.FeaturePlan
     feature_report: FeatureReport
     separation: dict = field(default_factory=dict)
+    core: trimesh.Trimesh | None = None
+    core_report: dict = field(default_factory=dict)
+    pins: trimesh.Trimesh | None = None
     timings: dict = field(default_factory=dict)
 
     def report(self) -> dict:
         a, b = float(self.half_a.volume), float(self.half_b.volume)
-        return {
+        out = {
             "pull_direction": [round(float(v), 6) for v in self.direction],
             "mold": {
                 "half_a_volume_cm3": round(a / 1000.0, 2),
@@ -235,14 +285,23 @@ class FeatureResult:
             },
             "timings_s": {k: round(v, 3) for k, v in self.timings.items()},
         }
+        if self.core is not None:
+            out["core"] = self.core_report
+            out["halves"]["core"] = meshio.mesh_stats(self.core)
+        return out
 
     def write(self, out_dir: str | Path) -> dict:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        return {
+        written = {
             "half_a": str(meshio.export(self.half_a, out_dir / "mold_half_a.stl")),
             "half_b": str(meshio.export(self.half_b, out_dir / "mold_half_b.stl")),
         }
+        if self.core is not None:
+            written["core"] = str(meshio.export(self.core, out_dir / "core.stl"))
+        if self.pins is not None:
+            written["pins"] = str(meshio.export(self.pins, out_dir / "dowel_pins.stl"))
+        return written
 
 
 def apply_feature_plan(
@@ -251,6 +310,7 @@ def apply_feature_plan(
     ctx: features.FeatureContext,
     plan: features.FeaturePlan | dict,
     *,
+    cfg: MoldConfig | None = None,
     cast: trimesh.Trimesh | None = None,
     verify: bool = True,
     progress=None,
@@ -264,17 +324,21 @@ def apply_feature_plan(
     split.
     """
     report = progress or (lambda *a, **k: None)
+    cfg = cfg or MoldConfig()
     timings: dict[str, float] = {}
 
     report(0.05, "cutting features")
     t0 = time.time()
-    half_a, half_b, feat = features.apply_plan(
-        half_a, half_b, ctx, plan, progress=lambda f, msg: report(0.05 + 0.75 * f, msg)
+    bodies, feat = features.apply_plan(
+        half_a, half_b, ctx, plan, cfg=cfg, progress=lambda f, msg: report(0.05 + 0.75 * f, msg)
     )
+    half_a, half_b, core_mesh = bodies
+    pins = bodies.pins
     timings["features"] = time.time() - t0
     validate.assert_solid_enough(half_a, "half A (with features)")
     validate.assert_solid_enough(half_b, "half B (with features)")
 
+    core_report = dict(feat.core)
     separation: dict = {}
     if verify:
         report(0.85, "verifying the mold opens")
@@ -282,6 +346,10 @@ def apply_feature_plan(
         separation = validate.separation_report(
             half_a, half_b, cast if cast is not None else ctx.cavity, ctx.direction
         )
+        if core_mesh is not None:
+            core_report["release"] = core_mod.release_report(
+                core_mesh, half_a, half_b, ctx.direction
+            )
         timings["verify"] = time.time() - t0
         if not separation.get("opens", False):
             log.error("mold halves do not separate: %s", separation)
@@ -291,9 +359,12 @@ def apply_feature_plan(
         half_a=half_a,
         half_b=half_b,
         direction=np.asarray(ctx.direction, dtype=np.float64),
-        plan=features.FeaturePlan.from_dict(plan).normalised(),
+        plan=features.FeaturePlan.from_dict(plan).normalised(cfg),
         feature_report=feat,
         separation=separation,
+        core=core_mesh,
+        core_report=core_report,
+        pins=pins,
         timings=timings,
     )
 

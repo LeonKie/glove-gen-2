@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -264,6 +265,124 @@ class TestRoundTrip:
             json={"kind": "features", "config": {"source_job": analyze_id, "plan": {}}},
         )
         assert res.status_code == 409
+
+    def test_a_core_run_is_served_end_to_end(self, client, part_bytes):
+        """The third body has to reach the browser: preview, download, report."""
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball5.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+
+        job_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 8,
+                    "parting": {"grid": 60},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                    "core": {"enabled": True, "wall": 2.0},
+                    "core_tabs": {"count": 2},
+                },
+            },
+        ).json()["job"]["id"]
+        job = _wait_job(client, job_id)
+        assert job["state"] == "done", job.get("message")
+
+        core = job["result"]["report"]["core"]
+        assert core["wall"]["median_mm"] > 0
+        assert core["release"]["releases"]
+        assert "core" in job["result"]["previews"]
+
+        assert "core.stl" in job["parts"]
+        stl = client.get(f"/api/jobs/{job_id}/files/core.stl")
+        assert stl.status_code == 200 and len(stl.content) > 1000
+        assert client.get(f"/api/jobs/{job_id}/preview/core.bin").status_code == 200
+
+    def test_a_core_mold_can_be_re_cut_without_eroding_again(self, client, part_bytes):
+        """The core is a plan like any other, and the erosion is cached.
+
+        Nothing about where the plate's plane sits or how many dowels there are
+        depends on the Minkowski difference that built the core, so an edit pays
+        for the plan and not for that.
+        """
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball6.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+
+        job_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 8,
+                    "parting": {"grid": 60},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                    "core": {"enabled": True, "wall": 2.0},
+                    "carrier": {"enabled": True},
+                },
+            },
+        ).json()["job"]["id"]
+        built = _wait_job(client, job_id)
+        assert built["state"] == "done", built.get("message")
+        plan = built["result"]["plan"]
+        assert any(i["kind"] == "plate" for i in plan["items"])
+
+        # Move the plate's plane and thin it: the edit has to come back with a
+        # core, and with the plate where it was asked for.
+        edited = json.loads(json.dumps(plan))
+        for item in edited["items"]:
+            if item["kind"] == "plate":
+                item["params"]["thickness"] = 6.0
+                moved = list(item["position"])
+                moved[2] -= 2.0
+                item["position"] = moved
+
+        edit_id = client.post(
+            "/api/jobs",
+            json={
+                "kind": "features",
+                "config": {"source_job": job_id, "plan": edited, "verify": False},
+            },
+        ).json()["job"]["id"]
+        done = _wait_job(client, edit_id)
+        assert done["state"] == "done", done.get("message")
+
+        core = done["result"]["report"]["core"]
+        assert core["plate"]["asked_thickness_mm"] == pytest.approx(6.0)
+        assert "core" in done["result"]["previews"]
+        assert "core.stl" in done["parts"]
+        # The erosion is the expensive step and it is not repeated.
+        assert "core_erode" not in done["result"]["report"]["timings_s"]
+
+    def test_a_plain_mold_offers_no_core(self, client, part_bytes):
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball7.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+        job_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 8,
+                    "parting": {"grid": 60},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                },
+            },
+        ).json()["job"]["id"]
+        job = _wait_job(client, job_id)
+        assert job["state"] == "done", job.get("message")
+        assert "core" not in job["result"]["report"]
+        assert "core.stl" not in job["parts"]
+        assert client.get(f"/api/jobs/{job_id}/preview/core.bin").status_code == 404
 
     def test_heatmap_rejects_bad_directions(self, client, part_bytes):
         mesh_id = client.post(

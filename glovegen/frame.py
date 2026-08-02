@@ -34,13 +34,30 @@ class Frame:
     rot: np.ndarray
 
     @classmethod
-    def from_direction(cls, direction) -> "Frame":
+    def from_direction(cls, direction, seed=None) -> "Frame":
+        """Build a frame with ``direction`` as local +Z.
+
+        The rotation *about* the direction is arbitrary and normally left to
+        ``align_vectors``. ``seed`` pins it instead: local +X becomes the part of
+        ``seed`` perpendicular to the direction. A block built in such a frame has
+        two of its faces square to ``seed``, which is what the carrier plate needs
+        -- it is trimmed perpendicular to the pour axis, and slicing an
+        arbitrarily-oriented box on an oblique plane gives a corner wedge rather
+        than a plate.
+        """
         d = unit(direction)
         rot = trimesh.geometry.align_vectors(d, [0.0, 0.0, 1.0])[:3, :3]
         # align_vectors is exact up to float error; re-seat the last row so
         # rot[2] is the requested direction bit-for-bit.
         rot = np.array(rot, dtype=np.float64)
         rot[2] = d
+        if seed is not None:
+            s = np.asarray(seed, dtype=np.float64).reshape(3)
+            s = s - d * (s @ d)
+            # A seed parallel to the direction says nothing about the roll, so
+            # fall back to whatever align_vectors picked.
+            if np.linalg.norm(s) > 1e-6:
+                rot[0] = s
         # Re-orthonormalise rows 0/1 against row 2 (Gram-Schmidt).
         rot[0] -= rot[2] * (rot[0] @ rot[2])
         rot[0] /= np.linalg.norm(rot[0])

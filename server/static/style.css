@@ -343,3 +343,56 @@ select {
 .job-row .s.failed, .job-row .s.interrupted { color: var(--bad); }
 .job-row .s.running, .job-row .s.queued { color: var(--warn); }
 .job-row button { padding: 2px 7px; font-size: 11px; }
+
+/* The hollow-cast options, nested under their own switch. Indented against a
+   rule so the group reads as belonging to the toggle above it, and so the
+   Mold panel does not look twice as long when the core is switched off. */
+.subpanel {
+  margin: 4px 0 14px;
+  padding: 10px 0 2px 12px;
+  border-left: 2px solid var(--line);
+}
+.subpanel label.lead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.subpanel .hint { margin-bottom: 10px; }
+.subpanel .row:last-of-type { margin-bottom: 8px; }
+
+/* The cut plane's own control. It is not a size, it is a position, and it
+   moves far more than a radius does — so it gets the full row width and a
+   caption that says what it is rather than a two-letter label. */
+.ctl.plane {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+  margin-top: 2px;
+}
+.ctl.plane .lbl { color: var(--accent); }
+
+/* Something true about a whole group that no single row can say — a carrier
+   plate with no dowels under it, say, which looks finished and is not. */
+.grp-warn {
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--warn);
+  background: #2b2519;
+  color: var(--warn);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* What a group is, for the ones whose name does not say it. A dowel and a
+   screw are both pins under the plate; which side of the seam they land on is
+   the whole difference, and no marker can show that. */
+.grp-note {
+  margin: 0 0 10px;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.grp > .grp-note { margin: 0 0 4px; }

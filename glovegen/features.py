@@ -106,7 +106,7 @@ def frustum(
     return revolved([(r_bottom, 0.0), (r_top, float(height))], sections=sections)
 
 
-def _place_local(mesh: trimesh.Trimesh, frame: Frame, origin_local, axis_local=None):
+def place_local(mesh: trimesh.Trimesh, frame: Frame, origin_local, axis_local=None):
     """Move a +Z-aligned primitive to ``origin_local`` and convert to world."""
     out = mesh.copy()
     if axis_local is not None:
@@ -135,7 +135,20 @@ def _difference(a, b, label="difference"):
 # the plan
 # --------------------------------------------------------------------------
 
-KINDS = ("key", "spout", "vent")
+# The order items are cut in, and so the order they are listed in. ``plate``
+# leads because it is the plane cut: it decides how much mold there is at all,
+# and every core item after it stands on the face it leaves.
+KINDS = ("plate", "key", "spout", "vent", "core_tab", "dowel", "screw", "port")
+
+# Kinds that only mean anything when a core was built. They are proposed only
+# for a core run and skipped with a reason otherwise, rather than quietly
+# dropped, so an edited plan carried over from a plain mold explains itself.
+CORE_KINDS = ("plate", "core_tab", "dowel", "screw", "port")
+
+# ...and of those, the ones that only mean anything once a plate has cut the
+# mold. A dowel is not one of them: it locks the core to the halves and needs
+# no plate at all, which is the whole difference between it and a screw.
+PLATE_KINDS = ("screw", "port")
 
 # Sizes a caller may set per item, with the range each is clamped to. The
 # bounds are sanity rails, not opinions: they keep a stray unit (metres for
@@ -151,6 +164,15 @@ PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
     },
     "spout": {"inner_radius": (0.5, 60.0), "outer_radius": (0.5, 80.0)},
     "vent": {"radius": (0.2, 20.0)},
+    "plate": {"thickness": (2.0, 60.0)},
+    "core_tab": {"radius": (0.5, 20.0), "clearance": (0.0, 3.0)},
+    "dowel": {
+        "radius": (1.0, 20.0),
+        "engagement": (1.0, 60.0),
+        "clearance": (0.0, 2.0),
+    },
+    "screw": {"radius": (0.5, 10.0), "depth": (2.0, 60.0), "clearance": (0.0, 3.0)},
+    "port": {"inner_radius": (0.5, 30.0), "outer_radius": (1.0, 60.0)},
 }
 
 
@@ -174,6 +196,27 @@ def _defaults_for(kind: str, cfg: MoldConfig | None = None) -> dict[str, float]:
     if kind == "vent":
         v: VentConfig = cfg.vents
         return {"radius": v.radius}
+    if kind == "plate":
+        return {"thickness": cfg.carrier.plate_thickness}
+    if kind == "core_tab":
+        return {"radius": cfg.core_tabs.radius, "clearance": cfg.core_tabs.clearance}
+    if kind == "dowel":
+        d = cfg.core_dowels
+        return {
+            "radius": d.radius,
+            "engagement": d.engagement,
+            "clearance": d.clearance,
+        }
+    if kind == "screw":
+        c = cfg.carrier
+        return {
+            "radius": c.screw_radius,
+            "depth": c.screw_depth,
+            "clearance": c.screw_clearance,
+        }
+    if kind == "port":
+        c = cfg.carrier
+        return {"inner_radius": c.port_inner_radius, "outer_radius": c.port_outer_radius}
     raise ValueError(f"unknown feature kind {kind!r}, expected one of {KINDS}")
 
 
@@ -325,16 +368,29 @@ class FeatureContext:
     surface: PartingSurface
     local_bounds: np.ndarray  # (2, 3) block extent in the pull frame
     cavity: trimesh.Trimesh
+    # Only a core run fills these in. The block is what the carrier plate is
+    # sliced out of -- the halves cannot stand in for it, because the plate has
+    # to span the cavity opening as well, which is exactly the part of the block
+    # they are missing. The core is the eroded body before any of the plan
+    # touches it, so a re-apply can re-cut from it without eroding again.
+    block: trimesh.Trimesh | None = None
+    core: trimesh.Trimesh | None = None
     _free_dist: np.ndarray | None = field(default=None, repr=False)
 
     @classmethod
     def from_mold(
-        cls, result: MoldResult, cavity: trimesh.Trimesh | None = None
+        cls,
+        result: MoldResult,
+        cavity: trimesh.Trimesh | None = None,
+        *,
+        core: trimesh.Trimesh | None = None,
     ) -> "FeatureContext":
         return cls(
             surface=result.surface,
             local_bounds=np.asarray(result.local_bounds, dtype=np.float64),
             cavity=cavity if cavity is not None else result.cavity,
+            block=result.block,
+            core=core,
         )
 
     @property
@@ -398,12 +454,18 @@ class KeySite:
         }
 
 
-def find_key_sites(ctx: FeatureContext, cfg: KeyConfig) -> list[KeySite]:
+def find_key_sites(
+    ctx: FeatureContext, cfg: KeyConfig, *, allow: np.ndarray | None = None
+) -> list[KeySite]:
     """Pick well-spread spots on the parting face that clear the cavity.
 
     Keys must sit where the parting face is solid mold on both sides, i.e. in
     columns that miss the part entirely, with room for the key body above and
     the socket below.
+
+    ``allow`` masks the grid down to nodes a key may use. A core run passes the
+    region below the carrier plate's seating face: a key placed above it would
+    be sliced in two when the plate is trimmed off.
     """
     surface = ctx.surface
     nx, ny = surface.shape
@@ -415,6 +477,8 @@ def find_key_sites(ctx: FeatureContext, cfg: KeyConfig) -> list[KeySite]:
 
     need = cfg.radius + cfg.cavity_margin
     ok = free & (dist >= need)
+    if allow is not None:
+        ok &= allow
 
     # Stay clear of the block's outside walls too.
     border_x = int(np.ceil((cfg.radius + 2.0) / dx))
@@ -506,7 +570,7 @@ def _apply_key(
             (radius, z + overlap),
         ]
     )
-    key = _place_local(key, ctx.frame, (local[0], local[1], 0.0))
+    key = place_local(key, ctx.frame, (local[0], local[1], 0.0))
     half_a = _union(half_a, key, "key -> A")
 
     # Socket: the key's *swept* volume as it withdraws along +d, not just its
@@ -520,7 +584,7 @@ def _apply_key(
             (radius + c, z_sweep),
         ]
     )
-    socket = _place_local(socket, ctx.frame, (local[0], local[1], 0.0))
+    socket = place_local(socket, ctx.frame, (local[0], local[1], 0.0))
     half_b = _difference(half_b, socket, "socket -> B")
 
     detail = KeySite(
@@ -779,10 +843,35 @@ def _apply_vent(
 
 
 @dataclass
+class Bodies:
+    """What a plan is cut into, and what comes out the other side.
+
+    Two halves on a plain run; three once a core is in play. The core is a
+    result rather than an input because the plan *builds* it -- the plate, the
+    dowels and the tabs are all unioned onto the eroded body.
+    """
+
+    half_a: trimesh.Trimesh
+    half_b: trimesh.Trimesh
+    core: trimesh.Trimesh | None = None
+    # The dowel pins, fused into one mesh. Deliberately outside the iteration
+    # below: they are not a body of the mold but loose hardware, and a length
+    # of the right rod does the job just as well as a printed one.
+    pins: trimesh.Trimesh | None = None
+
+    def __iter__(self):
+        """So ``half_a, half_b, core = bodies`` reads the obvious way."""
+        return iter((self.half_a, self.half_b, self.core))
+
+
+@dataclass
 class FeatureReport:
     keys: dict = field(default_factory=dict)
     spout: dict = field(default_factory=dict)
     vents: dict = field(default_factory=dict)
+    # Only a core run fills this in: the wall it measured, the plate it cut and
+    # what the seam tabs cost the cast.
+    core: dict = field(default_factory=dict)
     pour_axis: list[float] = field(default_factory=list)
     # One entry per planned item, applied or not, so a caller can tell the
     # difference between "you switched it off" and "it would not fit".
@@ -794,6 +883,7 @@ class FeatureReport:
             "keys": self.keys,
             "spout": self.spout,
             "vents": self.vents,
+            "core": self.core,
             "items": self.items,
         }
 
@@ -813,8 +903,38 @@ def plan_features(
     pour_axis = choose_pour_axis(ctx.cavity, cfg)
     items: list[FeatureItem] = []
 
+    def add(kind: str, position, note: str, n: int | None = None) -> None:
+        items.append(
+            FeatureItem(
+                id=f"{kind}-{n}" if n else f"{kind}-1",
+                kind=kind,
+                position=[float(v) for v in position],
+                params=_defaults_for(kind, cfg),
+                note=note,
+            )
+        )
+
+    # A carrier plate cuts the mold in two along a plane, so everything else has
+    # to be proposed on the side that survives. Staging it here -- one boolean
+    # on the block and one on the core, no touching of the halves -- is what
+    # lets the rest of the pass see the geometry the cut will actually leave.
+    state = _stage_core(ctx, pour_axis, cfg)
+    ceiling = state.plane if state is not None else None
+    if state is not None and state.has_plate:
+        add(
+            "plate",
+            state.plate_point,
+            f"cuts the mold {state.discarded_note}",
+        )
+
+    allow = None
+    if ceiling is not None:
+        from . import core as core_mod
+
+        allow = core_mod.nodes_below(ctx.surface, pour_axis, ceiling - cfg.keys.radius)
+
     if cfg.keys.enabled:
-        for n, site in enumerate(find_key_sites(ctx, cfg.keys), start=1):
+        for n, site in enumerate(find_key_sites(ctx, cfg.keys, allow=allow), start=1):
             items.append(
                 FeatureItem(
                     id=f"key-{n}",
@@ -828,33 +948,54 @@ def plan_features(
                 )
             )
 
+    # With a plate on, the cavity's high point along the pour axis *is* the cut
+    # face, and the plate seals the annulus shut over it. A spout aimed there
+    # would be cut into material the plane discards; the port through the plate
+    # is the way in instead.
     spout_world = None
-    if cfg.spout.enabled:
+    if cfg.spout.enabled and not (state is not None and state.has_plate):
         spout_world = spout_entry(ctx.cavity, ctx, pour_axis)
-        items.append(
-            FeatureItem(
-                id="spout-1",
-                kind="spout",
-                position=[float(v) for v in spout_world],
-                params=_defaults_for("spout", cfg),
-                note="cavity high point along the pour axis",
-            )
-        )
+        add("spout", spout_world, "cavity high point along the pour axis")
 
     if cfg.vents.enabled:
         traps = find_air_traps(
             ctx.cavity, pour_axis, cfg.vents, spout_world=spout_world
         )
+        if ceiling is not None:
+            traps = [t for t in traps if float(t @ pour_axis) <= ceiling]
         for n, point in enumerate(traps, start=1):
-            items.append(
-                FeatureItem(
-                    id=f"vent-{n}",
-                    kind="vent",
-                    position=[float(v) for v in point],
-                    params=_defaults_for("vent", cfg),
-                    note="trapped-air pocket",
-                )
-            )
+            add("vent", point, "trapped-air pocket", n)
+
+    if state is not None:
+        from . import core as core_mod
+
+        # Tabs and dowels want the same spots -- both run from the core out to
+        # solid mold on the seam -- so whichever is planned first is kept clear
+        # of by the other.
+        seam: list = []
+        if cfg.core_tabs.enabled:
+            for n, (anchor, grip) in enumerate(
+                core_mod.find_tab_sites(ctx, state, cfg), start=1
+            ):
+                add("core_tab", anchor, "pinched on the parting seam", n)
+                seam.append(grip)
+        if cfg.core_dowels.enabled:
+            for n, (anchor, grip) in enumerate(
+                core_mod.find_dowel_sites(ctx, state, cfg, avoid=seam), start=1
+            ):
+                add("dowel", anchor, "a pin locks the core to both halves", n)
+                seam.append(grip)
+        if state.has_plate:
+            port = core_mod.find_port_site(ctx, state)
+            if port is not None:
+                add("port", port, "over the ring of cast at the cut face")
+            for n, point in enumerate(
+                core_mod.find_screw_sites(
+                    ctx, state, cfg, [port] if port is not None else []
+                ),
+                start=1,
+            ):
+                add("screw", point, "clamps the plate down", n)
 
     plan = FeaturePlan(items=items, pour_axis=[float(v) for v in pour_axis])
     log.info(
@@ -863,6 +1004,34 @@ def plan_features(
         {k: len(plan.of_kind(k)) for k in KINDS},
     )
     return plan.normalised(cfg)
+
+
+def _stage_core(ctx: FeatureContext, pour_axis, cfg: MoldConfig):
+    """Work out what the cut will leave, without cutting anything yet.
+
+    Placement has to happen against the geometry the plate's plane will produce,
+    not the geometry as it stands: a dowel proposed where the block is about to
+    be thrown away is a dowel nobody can use. Staging costs one boolean on the
+    block and one on the core, which is what buys every later site the right
+    answer.
+    """
+    if ctx.core is None:
+        return None
+    from . import core as core_mod
+
+    state = core_mod.CoreState(body=ctx.core, axis=unit(pour_axis))
+    if not cfg.carrier.enabled:
+        return state
+    try:
+        core_mod.stage_plate(
+            ctx,
+            core_mod.default_plate_point(ctx.cavity, pour_axis, cfg),
+            cfg.carrier.plate_thickness,
+            state,
+        )
+    except FeatureSkipped as exc:
+        log.warning("no carrier plate proposed: %s", exc)
+    return state
 
 
 def _aggregate(report: FeatureReport, plan: FeaturePlan, details: dict[str, list[dict]]) -> None:
@@ -887,6 +1056,9 @@ def _aggregate(report: FeatureReport, plan: FeaturePlan, details: dict[str, list
             "radius_mm": max((v["radius_mm"] for v in vents), default=0.0),
             "vents": vents,
         }
+    for kind in CORE_KINDS:
+        if kind != "plate" and plan.of_kind(kind):
+            report.core[f"{kind}s"] = details[kind]
 
 
 def apply_plan(
@@ -897,7 +1069,7 @@ def apply_plan(
     *,
     cfg: MoldConfig | None = None,
     progress=None,
-) -> tuple[trimesh.Trimesh, trimesh.Trimesh, FeatureReport]:
+) -> tuple[Bodies, FeatureReport]:
     """Cut a plan into a pair of base halves.
 
     Items that cannot be placed are reported and skipped, never fatal: one knob
@@ -907,9 +1079,17 @@ def apply_plan(
     ``progress`` is called with a fraction of *this* step, 0 to 1; the caller
     decides where that sits in its own run.
     """
+    from . import core as core_mod  # core builds on this module's primitives
+
     report_progress = progress or (lambda *a, **k: None)
+    cfg = cfg or MoldConfig()
     plan = FeaturePlan.from_dict(plan).normalised(cfg)
     pour_axis = unit(plan.pour_axis)
+
+    bodies = Bodies(half_a=half_a, half_b=half_b)
+    state = (
+        core_mod.CoreState(body=ctx.core, axis=pour_axis) if ctx.core is not None else None
+    )
 
     out = FeatureReport(pour_axis=[round(float(v), 4) for v in pour_axis])
     details: dict[str, list[dict]] = {k: [] for k in KINDS}
@@ -920,14 +1100,38 @@ def apply_plan(
         report_progress(n / max(1, len(todo)), f"cutting {item.kind} {n + 1}/{len(todo)}")
         entry = item.as_dict()
         try:
-            if item.kind == "key":
-                half_a, half_b, detail = _apply_key(half_a, half_b, ctx, item)
-            elif item.kind == "spout":
-                half_a, half_b, detail = _apply_spout(
-                    half_a, half_b, ctx, item, pour_axis
+            if item.kind in CORE_KINDS and state is None:
+                raise FeatureSkipped(
+                    "this mold has no core, so there is nothing for a "
+                    f"{item.kind.replace('_', ' ')} to attach to"
                 )
+            if item.kind in PLATE_KINDS and not state.has_plate:
+                raise FeatureSkipped(
+                    f"a {item.kind} needs the carrier plate, which is not in "
+                    "this plan"
+                )
+            if item.kind == "key":
+                bodies.half_a, bodies.half_b, detail = _apply_key(
+                    bodies.half_a, bodies.half_b, ctx, item
+                )
+            elif item.kind == "spout":
+                bodies.half_a, bodies.half_b, detail = _apply_spout(
+                    bodies.half_a, bodies.half_b, ctx, item, pour_axis
+                )
+            elif item.kind == "vent":
+                bodies.half_a, bodies.half_b, detail = _apply_vent(
+                    bodies.half_a, bodies.half_b, ctx, item
+                )
+            elif item.kind == "plate":
+                detail = core_mod.apply_plate(bodies, ctx, item, state, cfg)
+            elif item.kind == "core_tab":
+                detail = core_mod.apply_tab(bodies, ctx, item, state, cfg)
+            elif item.kind == "dowel":
+                detail = core_mod.apply_dowel(bodies, ctx, item, state, cfg)
+            elif item.kind == "screw":
+                detail = core_mod.apply_screw(bodies, ctx, item, state, cfg)
             else:
-                half_a, half_b, detail = _apply_vent(half_a, half_b, ctx, item)
+                detail = core_mod.apply_port(bodies, ctx, item, state, cfg)
         except FeatureSkipped as exc:
             log.info("skipping %s %s: %s", item.kind, item.id, exc)
             entry.update(status="skipped", reason=str(exc))
@@ -940,13 +1144,43 @@ def apply_plan(
         if item.id not in by_id:
             out.items.append({**item.as_dict(), "status": "off", "reason": ""})
 
+    if state is not None:
+        report_progress(0.95, "fusing the core assembly")
+        bodies.core = state.assembly()
+        bodies.pins = state.pin_stock()
+        out.core = _core_summary(state, ctx, cfg, details, bodies.core)
+
     _aggregate(out, plan, details)
     log.info(
         "applied %d/%d feature(s)",
         sum(1 for i in out.items if i["status"] == "applied"),
         len(plan.items),
     )
-    return half_a, half_b, out
+    return bodies, out
+
+
+def _core_summary(state, ctx, cfg: MoldConfig, details: dict, assembly) -> dict:
+    """The measured half of a core run: the wall, and what the tabs cost."""
+    from . import core as core_mod
+
+    cut = None if state.plane is None else state.plane - cfg.core.wall
+    return {
+        "wall": core_mod.measure_wall(
+            state.wall_body if state.wall_body is not None else state.body,
+            ctx.cavity,
+            cfg.core.wall,
+            pour_axis=state.axis,
+            cut=cut,
+        ),
+        "plate": details["plate"][0] if details["plate"] else None,
+        # A core in two pieces is not a core. It happens when a bore crosses
+        # the root of a tab, so it is worth saying out loud rather than leaving
+        # to be discovered in a slicer.
+        "pieces": core_mod.real_pieces(assembly),
+        "tab_through_wall_mm3": core_mod.tab_protrusion(
+            state.tabs, ctx.cavity, state.body
+        ),
+    }
 
 
 def apply_features(
@@ -955,7 +1189,7 @@ def apply_features(
     cfg: MoldConfig,
     *,
     progress=None,
-) -> tuple[trimesh.Trimesh, trimesh.Trimesh, FeatureReport]:
+) -> tuple[Bodies, FeatureReport]:
     """Plan and cut features in one go: the fully automatic path."""
     ctx = FeatureContext.from_mold(result, cavity)
     plan = plan_features(ctx, cfg)

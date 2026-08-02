@@ -27,8 +27,17 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --key-radius 7 --spout-outer 1
 # or hand it the plan from a previous run, edited
 glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 
-# or use the web app, where the knobs and holes become editable once the
-# mold is built, and re-applying them does not rebuild it
+# cast a hollow glove instead of a solid positive. --wall adds core.stl and
+# nothing else; --plate cuts the mold on a plane and caps it, --dowels bores
+# through all three bodies for loose registration pins, --tabs mould the same
+# registration onto the core instead
+glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
+glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5 --plate --dowels 2
+
+# or use the web app: "Cast a hollow glove" under Mold turns the core on, the
+# plate, dowels and tabs are opt-in beside it, and every one of them becomes
+# an editable row once the mold is built — including a slider for where the
+# plate's plane cuts. Re-applying does not rebuild the mold or the core.
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -201,7 +210,169 @@ whose every route back out re-enters the cast, is reported as `skipped` with the
 reason and the rest of the plan is still cut — one bad hand-placed item is not a
 reason to throw away a mold that took a minute to build.
 
-### 6. Verification
+### 6. Casting a glove: the core, and stopping it float
+
+Everything above casts a **solid** positive. A glove is a wall, so it needs a
+second body inside the cavity — the core — with the cast forming in the gap.
+`--wall 2.5` switches that on, and adds nothing else.
+
+```bash
+glovegen mold scan.stl -o out/ --wall 2.5            # core.stl, and that is all
+glovegen mold scan.stl -o out/ --wall 2.5 --plate    # ...cut and capped
+glovegen mold scan.stl -o out/ --wall 2.5 --dowels 2 # ...and pinned to the halves
+```
+
+The wall is then only as good as the core's position, and a core that is merely
+*in* the cavity is not located. It has six degrees of freedom and one of them is
+driven: a hollow printed core displacing ~700 cm³ of silicone at 1.10 g/cm³ sees
+about **7.7 N of buoyancy** against maybe 1.5 N of self-weight. It floats, and
+the wall goes thin on top before it goes thick underneath. Gravity seating is
+not a fixation scheme.
+
+The core body is the part eroded by the wall — a Minkowski *difference* against
+a ball, the exact inverse of `cavity_offset`, run on a decimated copy because it
+scales badly with face count.
+
+#### The plate is a plane cut
+
+A plate cannot be bolted onto a closed mold: there is nowhere for it to reach
+the core. So adding one **cuts the whole mold** along a plane through the core
+and throws away everything past it — half A, half B and the core together.
+
+```
+half_a = half_a − beyond      core  = core − beyond      (a merge depth further)
+half_b = half_b − beyond      plate = block ∩ slab(plane, plane + thickness)
+core_assembly = core ∪ plate ∪ dowels ∪ tabs
+```
+
+That leaves three coplanar faces, and the plate is a slab of the block's own
+cross-section laid across all of them: it caps the halves, spans the annulus so
+the cast is sealed in, and swallows the core's stub so the two print as one
+body. **The glove's rim is exactly the cut** — no separate cuff logic, because
+the plane does that job too.
+
+The core is trimmed a merge depth *above* the plane rather than at it. The stub
+that leaves sticking up is inside the plate, which turns the union of core and
+plate from a coplanar boolean into an overlapping one, and the space it occupies
+is space the halves have just vacated, so nothing can foul on it.
+
+The screws that hold it down alternate between the halves: all four in one half
+holds that half down and leaves the other loose. They are the one thing here
+that goes in *after* the mold is shut, which is why they are also the one thing
+allowed to sit off the parting seam.
+
+The block's pull frame is rolled to line up with the pour axis when a core is
+asked for, so a box block has two faces square to the cut. Without that, slicing
+an arbitrarily-rolled box on an oblique plane gives a corner wedge.
+
+#### Sealing the annulus means the pour moves
+
+With the plate on, the cavity's high point along the pour axis *is* the cut
+face, and the plate covers it. A spout aimed there would be cut into material
+the plane is about to discard, so with a plate in the plan the spout is replaced
+by a **port**: a funnel through the plate down to the ring of cast at the cut
+face. The ring is only a wall thick, so the funnel necks down to meet it.
+
+#### Holding the core still: tabs and dowels
+
+The plate closes the mold but does not locate the core in it, and the core hangs
+off it as a cantilever whose tip deflection goes as length cubed. Both of the
+things that fix that run the same line — from inside the core, out past the cast
+silhouette, into mold that is solid on both sides of the parting face — and
+differ only in what is done along it.
+
+A **tab** adds material: a post moulded onto the core, pinched flat when the
+halves close. No extra part, but it is still attached when the core is pulled
+out of a cured glove, so the glove has to stretch off it.
+
+A **dowel** takes material away: the same line bored through the core, half A
+*and* half B alike, so a plain rod dropped in from outside the block locks all
+three together. Pull the pin, open the mold, and the core leaves cleanly. Both
+leave the same hole in the glove; only the tab has to be dragged out through it.
+The pins come out as `dowel_pins.stl`, or use rod of the same diameter.
+
+```
+tab     core ████■■■■■■■■■■──────  post added along the run, pinched by the halves
+dowel   core ████░░░░░░░░░░░░░░░>  bore taken away along it, and out to daylight
+             ↑ grip  ↑ cast   ↑ mold          ↑ the pin goes in from here
+```
+
+The bore is blind in the core — it stops short of breaking out the far side,
+which on anything slender would not weaken the core but saw it in half — and
+open to daylight at the other end, because a bore that stops inside the block
+traps its own pin.
+
+Placement for both is the alignment-key logic run in reverse: a key wants a
+column that *misses* the part; these want an outer end in one of those and an
+inner end where the parting surface runs inside the core, and one distance
+transform away from the core gives every free node both its nearest core node
+and the run between them. Two runs are kept apart **grip to grip**, not anchor
+to anchor: they can be anchored far apart and still take hold of the same few
+millimetres of core, and a dowel bored through the root of a tab does not weaken
+it, it cuts it off.
+
+#### The invariant that makes the assembly exist
+
+**Every core-side feature is centred on the parting surface** — tabs and dowel
+bores alike. That is not tidiness, it is what makes an assembly sequence
+possible at all. Each leaves a half-round groove in either half, widest exactly
+at its mouth, so the whole core assembly lifts straight out of half B along
+`+d`. A screw is the exception that proves it: it runs down the pour axis into
+one half only, and it is the one thing here that goes in *after* the mold is
+shut.
+
+So the sequence is the ordinary one: core into half B, pins in, half A down on
+top, screws through the plate. Coming apart is the reverse, and the pins have to
+come out first.
+
+Because a straight bore in a *curved* parting surface only obeys that rule
+approximately, every bore's **seam drift** is measured and anything past
+`max_seam_drift` is skipped with the number in the reason, rather than silently
+cut as a groove wider inside than at its mouth. Bore depth is measured too: the
+plane cuts *through* the part, so at the cut face the cavity wall is right there
+and a fixed 12 mm dowel would be rejected at every position on the seam. Each
+bore gets whatever depth the cavity leaves, down to half a diameter.
+
+#### The plate, the dowels and the tabs are ordinary plan items
+
+`plate`, `dowel`, `screw`, `port` and `core_tab` are feature-plan kinds beside
+`key`, `spout` and `vent` — same positions, same clamped sizes, same
+skipped-with-a-reason handling, same editor, same `--plan` round trip. A second
+parallel plan document would have been a worse version of the one that already
+exists. `apply_plan` returns a `Bodies` rather than a pair of halves, because
+the plan now builds the core as well as cutting the mold.
+
+The core is built *before* the plan, not after: the plate has to have something
+to attach to before it can be placed, and placement is staged against the
+geometry the cut will leave rather than the geometry as it stands. The erosion
+depends on nothing the plan decides, so it is cached with the base halves and an
+edited plan — including a moved plane — re-cuts without eroding again.
+
+#### What it does not solve, and says so
+
+A tab is still attached to the core when the core is pulled out of a cured
+glove, so it drags through the slot it made. On a flexible cast that stretches;
+on a stiff one it tears. The report gives `tab_through_wall_mm3` — the tab
+volume actually sitting in the cast — so the trade is a number, not a hope. A
+dowel is the way out of it, at the price of a loose pin to keep track of.
+
+The wall itself is measured too, sampled off the core's surface against the
+cavity's, which is what the wall *is*. On a 13k-face hand-shaped test part at a
+2.5 mm target:
+
+```
+core erosion 16.2s · plate 0.3s · tabs 4.2s · fuse 0.1s · verify 0.7s
+wall  min 2.34  p05 2.37  median 2.50  max 2.50 mm,  0% under 90% of target
+```
+
+The shortfall is the eroding ball's tessellation, which undershoots at its facet
+centres and never overshoots: `ball_subdivisions` 1 costs 6.5% of the wall in
+17 s, 2 costs 1.8% in 27 s, 3 costs 0.4% in 63 s.
+
+One interaction worth knowing: `--block hull` ends the block in a dome, so a
+plate cut near the end is trimmed from a small cap of it.
+
+### 7. Verification
 
 `validate.separation_report` measures rather than assumes, by sliding the halves
 and intersecting:
@@ -257,10 +428,16 @@ offset-shelling approach.
 
 ## Known limits
 
-- The mold produces a **solid positive** of the scan. Casting a hollow glove or
-  liner needs a matching core, which is out of scope here.
 - Residual undercuts are reported, not eliminated. There is no N-part split;
   the design assumes a flexible cast material.
+- **Core runs** add two limits of their own. The erosion is a Minkowski
+  difference and dominates the run, so it goes through `core.faces`; and the
+  cast has to stretch off any seam *tabs* on its way out, reported as
+  `tab_through_wall_mm3` rather than assumed away — seam dowels avoid that but
+  cost you a loose pin per bore.
+- A carrier plate **throws away** everything past its plane, from the scan as
+  well as from the mold. That is the point, but the discarded volume is
+  reported so it is never a surprise.
 - A box block around a hand-and-forearm scan is ~4.2 L of plastic. Use
   `--block hull`, or crop the scan to the hand.
 - No auto-tiling to a printer bed: the hand mold's halves are ~150 × 78 × 386 mm
@@ -279,6 +456,7 @@ glovegen/
   parting.py        constrained height field -> parting surface + solid
   mold.py           block, block−part, the split
   features.py       the feature plan: choosing keys/spout/vents, and cutting them
+  core.py           hollow-cast core: erosion, the plane cut, plate and tabs
   pipeline.py       orchestration + reporting, and re-cutting an edited plan
   validate.py       solid gating, separation measurement
   cli.py            glovegen analyze | mold
@@ -362,6 +540,12 @@ docker run -d --init -p 8111:8111 -v glovegen-data:/data glovegen
 second copy of either doubles the memory peak.
 
 ## Configuration
+
+A core is off unless asked for: `--wall` on the command line, or
+`{"core": {"enabled": true, "wall": 2.5}}` in a job config. The plate, the
+dowels and the tabs are off on top of that — `carrier`, `core_dowels` and
+`core_tabs`, or `--plate`, `--dowels N` and `--tabs N` — so a wall on its own
+gets you a core and leaves the mold alone.
 
 Environment: `GLOVEGEN_STORE` (default `data/store`, `/data/store` in the
 image), `GLOVEGEN_TTL_HOURS` (24), `GLOVEGEN_MAX_UPLOAD_MB` (400),

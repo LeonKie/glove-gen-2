@@ -56,6 +56,33 @@ def _config_from_args(args) -> MoldConfig:
         cfg.keys.count = args.keys
     if getattr(args, "vents", None) is not None:
         cfg.vents.count = args.vents
+
+    # A core is opt-in: asking for a wall is what asks for one.
+    if getattr(args, "wall", None) is not None:
+        cfg.core.enabled = True
+        cfg.core.wall = args.wall
+    if getattr(args, "core_faces", None) is not None:
+        cfg.core.faces = args.core_faces
+    # The plate and the tabs are opt-in on top of the core, so asking for
+    # either is what switches it on.
+    if getattr(args, "plate", False) or getattr(args, "plate_thickness", None):
+        cfg.carrier.enabled = True
+    if getattr(args, "tabs", None):
+        cfg.core_tabs.enabled = True
+        cfg.core_tabs.count = args.tabs
+    if getattr(args, "dowels", None):
+        cfg.core_dowels.enabled = True
+        cfg.core_dowels.count = args.dowels
+    for target, attr, option in (
+        (cfg.core_tabs, "radius", "tab_radius"),
+        (cfg.core_dowels, "radius", "dowel_radius"),
+        (cfg.carrier, "cut_inset", "cut_inset"),
+        (cfg.carrier, "plate_thickness", "plate_thickness"),
+        (cfg.carrier, "screw_count", "screws"),
+    ):
+        value = getattr(args, option, None)
+        if value is not None:
+            setattr(target, attr, value)
     # Sizes. Placement stays automatic; these only change how big the knobs and
     # holes it picks come out.
     for target, attr, option in (
@@ -225,6 +252,45 @@ def main(argv: list[str] | None = None) -> int:
         "--spout-outer", type=float, default=None, help="spout radius at the block face, mm"
     )
     sizes.add_argument("--vent-radius", type=float, default=None, help="vent radius, mm")
+
+    core = p_mo.add_argument_group(
+        "hollow cast",
+        "Cast a glove rather than a solid positive. --wall adds the core and "
+        "nothing else; the plate and the tabs are opt-in on top of it.",
+    )
+    core.add_argument(
+        "--wall", type=float, default=None,
+        help="glove wall thickness in mm; giving this switches the core on",
+    )
+    core.add_argument(
+        "--core-faces", type=int, default=None,
+        help="face budget the core erosion runs at (the slowest step of a core run)",
+    )
+    core.add_argument(
+        "--plate", action="store_true",
+        help="cut the mold on a plane through the core and cap it with a "
+             "carrier plate, registered to the block by seam dowels",
+    )
+    core.add_argument(
+        "--cut-inset", type=float, default=None,
+        help="how far inside the cavity's far end the plate's plane sits, mm",
+    )
+    core.add_argument(
+        "--plate-thickness", type=float, default=None, help="carrier plate thickness, mm"
+    )
+    core.add_argument("--screws", type=int, default=None, help="clamping screws through the plate")
+    core.add_argument(
+        "--dowels", type=int, default=None,
+        help="bores through both halves and the core for loose registration pins; "
+             "giving this switches them on and writes dowel_pins.stl",
+    )
+    core.add_argument("--dowel-radius", type=float, default=None, help="dowel pin radius, mm")
+    core.add_argument(
+        "--tabs", type=int, default=None,
+        help="tabs moulded onto the core and pinched on the seam — a dowel without "
+             "the loose pin, at the cost of a tab to drag out of the glove",
+    )
+    core.add_argument("--tab-radius", type=float, default=None, help="seam tab radius, mm")
     p_mo.add_argument(
         "--plan",
         type=Path,
