@@ -245,6 +245,11 @@ def _write_base(store: Store, job: dict, result: pipeline.PipelineResult) -> Non
                     [float(v) for v in row] for row in mold_result.local_bounds
                 ],
                 "cavity": cavity,
+                # A core is built *after* the features and cuts its own neck,
+                # dowel bores and tab pockets into the halves. Re-cutting from
+                # the cached base would hand back halves the core no longer
+                # fits, so the edit path refuses rather than doing that quietly.
+                "core": result.core is not None,
             },
             indent=2,
         )
@@ -260,6 +265,13 @@ def _load_context(store: Store, base_job_id: str) -> features.FeatureContext:
             f"job {base_job_id} has no cached mold to re-cut features into"
         )
     ctx_data = json.loads(raw.read_text())
+    if ctx_data.get("core"):
+        raise ValueError(
+            f"job {base_job_id} was built with a core, whose neck, dowels and "
+            "tab pockets are cut after the features. Re-cutting features alone "
+            "would produce halves the core no longer fits; rebuild the mold "
+            "with the edited plan instead."
+        )
 
     if ctx_data["cavity"] == "mesh":
         cavity_path = store.mesh_dir(ctx_data["mesh_id"]) / "part.stl"
@@ -348,6 +360,7 @@ def _parts_manifest(out_dir: Path, written: dict) -> dict:
         },
     }
     for extra, label in (
+        ("core.stl", "Core, carrier plate and all"),
         ("parting_surface.stl", "Parting surface"),
         ("mold_uncut.stl", "Mold before splitting"),
     ):

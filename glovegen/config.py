@@ -103,6 +103,118 @@ class VentConfig:
 
 
 @dataclass
+class CoreConfig:
+    """The core: the body a *hollow* cast is formed against.
+
+    Off by default. With no core the mold produces a solid positive, which is
+    what every stage before this one assumes; switching it on adds a third
+    printed body and the geometry that locates it.
+    """
+
+    enabled: bool = False
+
+    # The glove wall: the gap left between the cavity and the core, and so the
+    # thickness of the cast. Everything about fixation is in service of holding
+    # this constant, so it is also the tolerance budget.
+    wall: float = 2.5
+
+    # Face budget the erosion runs at. The Minkowski difference that shrinks the
+    # part into a core is by far the most expensive step of a core run and
+    # scales badly with face count, so the core is built from a decimated copy.
+    faces: int | None = 40_000
+
+    # Tessellation of the eroding ball. A polyhedral ball undershoots the wall
+    # at its facet centres: 1 costs about 4% of the wall, 2 about 1.5%, at
+    # roughly 1.5x the time.
+    ball_subdivisions: int = 1
+
+    # Depth of *full-section* core at the cuff, measured down the pour axis.
+    # Above this the core fills the cavity completely, so no cast forms there
+    # and the glove is open across the whole wrist section. Without it the
+    # erosion caps the cuff with a wall-thick membrane.
+    cuff_depth: float = 5.0
+
+
+@dataclass
+class CarrierConfig:
+    """Option B: a carrier plate at the cuff, registered to the assembled block.
+
+    The plate is a slab trimmed off the cuff end of the block perpendicular to
+    the pour axis, and it is printed as one body with the core hanging from it.
+    It locates against the *assembled* block -- dowels straddling the parting
+    seam, so it references both halves equally instead of inheriting one half's
+    key clearance -- and is screwed down, because the load case is a core
+    floating up, not a core sinking.
+    """
+
+    enabled: bool = True
+
+    # Gap between the top of the cavity and the plate's seating face, so the
+    # plate seats on solid mold rather than on the edge of the cuff opening.
+    plate_gap: float = 1.0
+    plate_thickness: float = 10.0
+
+    # The stem from the core up to the plate. It runs entirely through mold
+    # material above the cavity, so it leaves no witness on the cast.
+    neck_radius: float = 8.0
+    neck_clearance: float = 0.2
+
+    dowel_count: int = 2
+    dowel_radius: float = 4.0
+    dowel_depth: float = 12.0
+    dowel_clearance: float = 0.15
+    # At the cuff the cavity's ceiling is a millimetre under the seating face,
+    # so a bore's usable depth is whatever the cavity leaves rather than
+    # whatever was asked for. Half a diameter still registers in plastic; below
+    # that a pin is decoration. A block margin close to the dowel diameter is
+    # what usually forces the compromise -- there is then no position both
+    # clear of the cavity and inside the plate's edge.
+    dowel_min_depth: float = 5.0
+    # Two dowels this much closer together than the seam is long are not two
+    # dowels; they are one dowel and a wobble.
+    dowel_min_spacing: float = 25.0
+
+    screw_count: int = 4
+    screw_radius: float = 2.0  # pilot bore into the block
+    screw_depth: float = 14.0
+    screw_min_depth: float = 6.0
+    screw_clearance: float = 0.4  # added for the through-hole in the plate
+
+    # How far a bore's axis may drift off the parting surface over its length
+    # before its half-round groove stops being widest at its mouth -- past this
+    # the groove is an undercut and the core locks into the halves.
+    max_seam_drift: float = 0.4
+
+
+@dataclass
+class CoreTabConfig:
+    """Option C: tabs from the core, pinched on the parting surface.
+
+    A tab reaches from the core out past the cast silhouette into mold that is
+    solid on both sides of the parting face, where closing the halves pinches
+    it. Cut on the parting surface it obeys the same groove rule as an
+    alignment key, and its witness mark lands on the seam that gets trimmed
+    anyway.
+    """
+
+    enabled: bool = True
+    count: int = 4
+    radius: float = 3.0
+    clearance: float = 0.2
+
+    # Mold material required around the tab's outer end, beyond its own radius.
+    anchor_margin: float = 2.0
+
+    min_length: float = 2.0
+    max_length: float = 45.0
+    # Spread along the core, so tabs brace the cantilever instead of clustering
+    # at its root where the neck already holds it.
+    min_spacing: float = 20.0
+
+    max_seam_drift: float = 0.4
+
+
+@dataclass
 class MoldConfig:
     """Top-level mold configuration."""
 
@@ -131,6 +243,9 @@ class MoldConfig:
     keys: KeyConfig = field(default_factory=KeyConfig)
     spout: SpoutConfig = field(default_factory=SpoutConfig)
     vents: VentConfig = field(default_factory=VentConfig)
+    core: CoreConfig = field(default_factory=CoreConfig)
+    carrier: CarrierConfig = field(default_factory=CarrierConfig)
+    core_tabs: CoreTabConfig = field(default_factory=CoreTabConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -145,6 +260,9 @@ class MoldConfig:
             "keys": KeyConfig,
             "spout": SpoutConfig,
             "vents": VentConfig,
+            "core": CoreConfig,
+            "carrier": CarrierConfig,
+            "core_tabs": CoreTabConfig,
         }
         kwargs: dict[str, Any] = {}
         for name, klass in sub.items():

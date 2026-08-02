@@ -104,37 +104,51 @@ def build_block(
     return block, local_bounds
 
 
+def to_manifold(mesh: trimesh.Trimesh):
+    """trimesh -> manifold3d, for the ops trimesh's boolean wrapper does not expose."""
+    from manifold3d import Manifold, Mesh
+
+    return Manifold(
+        mesh=Mesh(
+            vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
+            tri_verts=np.asarray(mesh.faces, dtype=np.uint32),
+        )
+    )
+
+
+def from_manifold(solid) -> trimesh.Trimesh:
+    """Inverse of :func:`to_manifold`."""
+    raw = solid.to_mesh()
+    out = trimesh.Trimesh(
+        vertices=np.asarray(raw.vert_properties[:, :3], dtype=np.float64),
+        faces=np.asarray(raw.tri_verts),
+        process=False,
+    )
+    out.merge_vertices()
+    return out
+
+
 def offset_cavity(mesh: trimesh.Trimesh, delta: float) -> trimesh.Trimesh:
     """Grow the cavity by ``delta`` mm, for cast shrinkage or fit clearance.
 
     Uses an exact Minkowski sum, which is expensive on a full-resolution scan;
-    the caller is expected to decimate first if it matters.
+    the caller is expected to decimate first if it matters. Shrinking is the
+    same operation with the ball on the other side -- see
+    :func:`glovegen.core.erode`.
     """
     if abs(delta) < 1e-9:
         return mesh
     if delta < 0:
         raise NotImplementedError(
-            "negative cavity_offset (shrinking the cavity) is not supported"
+            "negative cavity_offset (shrinking the cavity) is not supported; "
+            "core.erode() does inward offsets"
         )
-    from manifold3d import Manifold, Mesh
-
-    def to_manifold(m: trimesh.Trimesh) -> "Manifold":
-        return Manifold(
-            mesh=Mesh(
-                vert_properties=np.asarray(m.vertices, dtype=np.float32),
-                tri_verts=np.asarray(m.faces, dtype=np.uint32),
-            )
-        )
+    from manifold3d import Manifold
 
     ball = trimesh.creation.icosphere(subdivisions=1, radius=float(delta))
-    grown = Manifold.minkowski_sum(to_manifold(mesh), to_manifold(ball)).to_mesh()
-    out = trimesh.Trimesh(
-        vertices=np.asarray(grown.vert_properties[:, :3], dtype=np.float64),
-        faces=np.asarray(grown.tri_verts),
-        process=False,
+    return from_manifold(
+        Manifold.minkowski_sum(to_manifold(mesh), to_manifold(ball))
     )
-    out.merge_vertices()
-    return out
 
 
 def _boolean(op, meshes, label: str) -> trimesh.Trimesh:
@@ -165,7 +179,18 @@ def build_mold(
     cfg = cfg or MoldConfig()
     report = progress or (lambda *a, **k: None)
     timings: dict[str, float] = {}
-    frame = Frame.from_direction(direction)
+
+    # The roll of the pull frame is normally arbitrary. A core run pins it to
+    # the pour axis so two of the block's faces come out square to it: the
+    # carrier plate is trimmed perpendicular to the pour axis, and slicing an
+    # arbitrarily-rolled box on an oblique plane gives a corner wedge instead of
+    # a plate. Imported here because features.py builds on this module.
+    seed = None
+    if cfg.core.enabled and cfg.carrier.enabled:
+        from .features import choose_pour_axis
+
+        seed = choose_pour_axis(mesh, cfg)
+    frame = Frame.from_direction(direction, seed=seed)
 
     cavity = mesh
     if cfg.cavity_faces:

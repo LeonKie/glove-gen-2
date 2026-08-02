@@ -89,7 +89,7 @@ def is_solid_enough(
     return True, ""
 
 
-def _overlap_volume(a: trimesh.Trimesh, b: trimesh.Trimesh) -> float:
+def overlap_volume(a: trimesh.Trimesh, b: trimesh.Trimesh) -> float:
     """Volume shared by two solids, 0 if they are disjoint."""
     inter = trimesh.boolean.intersection([a, b], engine="manifold", check_volume=False)
     if inter is None or len(inter.faces) == 0:
@@ -147,7 +147,7 @@ def separation_report(
 
     moved_a = half_a.copy()
     moved_a.apply_translation(d * travel)
-    overlap = _overlap_volume(moved_a, half_b)
+    overlap = overlap_volume(moved_a, half_b)
     out["half_vs_half_mm3"] = round(overlap, 6)
 
     # Cast interference has to be sampled along the withdrawal path, not just at
@@ -165,7 +165,7 @@ def separation_report(
         for t in ladder:
             moved = half.copy()
             moved.apply_translation(sign * d * t)
-            worst = max(worst, _overlap_volume(moved, cast))
+            worst = max(worst, overlap_volume(moved, cast))
         out[f"half_{name}_vs_cast_mm3"] = round(worst, 6)
     out["cast_probe_travels_mm"] = ladder
 

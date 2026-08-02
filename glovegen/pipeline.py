@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+from . import core as core_mod
 from . import demold, features, meshio, mold, validate
 from .config import MoldConfig
 from .features import FeatureReport
@@ -25,6 +26,7 @@ STAGES = (
     "cavity",
     "split",
     "features",
+    "core",
     "verify",
 )
 
@@ -40,6 +42,10 @@ class PipelineResult:
     direction_score: demold.DirectionScore | None
     separation: dict
     feature_plan: features.FeaturePlan | None = None
+    # Only built when a core was asked for: the third printed body, plate and
+    # all, plus what was measured about it.
+    core: trimesh.Trimesh | None = None
+    core_report: dict = field(default_factory=dict)
     timings: dict = field(default_factory=dict)
 
     def report(self) -> dict:
@@ -67,6 +73,9 @@ class PipelineResult:
         }
         if self.direction_score is not None:
             out["demold"] = self.direction_score.as_dict()
+        if self.core is not None:
+            out["core"] = self.core_report
+            out["halves"]["core"] = meshio.mesh_stats(self.core)
         return out
 
     def write(self, out_dir: str | Path, *, extras: bool = True) -> dict:
@@ -77,6 +86,8 @@ class PipelineResult:
             "half_a": str(meshio.export(self.half_a, out_dir / "mold_half_a.stl")),
             "half_b": str(meshio.export(self.half_b, out_dir / "mold_half_b.stl")),
         }
+        if self.core is not None:
+            written["core"] = str(meshio.export(self.core, out_dir / "core.stl"))
         if extras:
             written["parting_surface"] = str(
                 meshio.export(
@@ -161,21 +172,45 @@ def run(
     t0 = time.time()
     ctx = features.FeatureContext.from_mold(mold_result)
     if plan is None:
-        report(0.74, "planning features")
+        report(0.71, "planning features")
         plan = features.plan_features(ctx, cfg)
     else:
         plan = features.FeaturePlan.from_dict(plan)
+    plan = features.FeaturePlan.from_dict(plan).normalised(cfg)
     half_a, half_b, feat = features.apply_plan(
         mold_result.half_a,
         mold_result.half_b,
         ctx,
         plan,
         cfg=cfg,
-        progress=lambda f, msg: report(0.76 + 0.18 * f, msg),
+        progress=lambda f, msg: report(0.72 + 0.14 * f, msg),
     )
     timings["features"] = time.time() - t0
     validate.assert_solid_enough(half_a, "half A (with features)")
     validate.assert_solid_enough(half_b, "half B (with features)")
+
+    # The core comes after the features on purpose: the carrier plate is the cap
+    # of the *finished* mold, so the spout and any vents leaving through the
+    # cuff face are already holes in it by the time it is trimmed off.
+    core_mesh = None
+    core_report: dict = {}
+    if cfg.core.enabled:
+        report(0.86, "building and fixating the core")
+        t0 = time.time()
+        core_result = core_mod.fixate(
+            half_a,
+            half_b,
+            ctx,
+            part,
+            plan.pour_axis,
+            cfg,
+            verify=verify,
+            progress=lambda f, msg: report(0.86 + 0.08 * f, msg),
+        )
+        half_a, half_b = core_result.half_a, core_result.half_b
+        core_mesh, core_report = core_result.core, core_result.report
+        timings.update(core_result.timings)
+        timings["core_total"] = time.time() - t0
 
     separation: dict = {}
     if verify:
@@ -196,7 +231,9 @@ def run(
         feature_report=feat,
         direction_score=score,
         separation=separation,
-        feature_plan=features.FeaturePlan.from_dict(plan).normalised(cfg),
+        feature_plan=plan,
+        core=core_mesh,
+        core_report=core_report,
         timings=timings,
     )
 

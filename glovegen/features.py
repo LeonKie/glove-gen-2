@@ -106,7 +106,7 @@ def frustum(
     return revolved([(r_bottom, 0.0), (r_top, float(height))], sections=sections)
 
 
-def _place_local(mesh: trimesh.Trimesh, frame: Frame, origin_local, axis_local=None):
+def place_local(mesh: trimesh.Trimesh, frame: Frame, origin_local, axis_local=None):
     """Move a +Z-aligned primitive to ``origin_local`` and convert to world."""
     out = mesh.copy()
     if axis_local is not None:
@@ -398,12 +398,18 @@ class KeySite:
         }
 
 
-def find_key_sites(ctx: FeatureContext, cfg: KeyConfig) -> list[KeySite]:
+def find_key_sites(
+    ctx: FeatureContext, cfg: KeyConfig, *, allow: np.ndarray | None = None
+) -> list[KeySite]:
     """Pick well-spread spots on the parting face that clear the cavity.
 
     Keys must sit where the parting face is solid mold on both sides, i.e. in
     columns that miss the part entirely, with room for the key body above and
     the socket below.
+
+    ``allow`` masks the grid down to nodes a key may use. A core run passes the
+    region below the carrier plate's seating face: a key placed above it would
+    be sliced in two when the plate is trimmed off.
     """
     surface = ctx.surface
     nx, ny = surface.shape
@@ -415,6 +421,8 @@ def find_key_sites(ctx: FeatureContext, cfg: KeyConfig) -> list[KeySite]:
 
     need = cfg.radius + cfg.cavity_margin
     ok = free & (dist >= need)
+    if allow is not None:
+        ok &= allow
 
     # Stay clear of the block's outside walls too.
     border_x = int(np.ceil((cfg.radius + 2.0) / dx))
@@ -506,7 +514,7 @@ def _apply_key(
             (radius, z + overlap),
         ]
     )
-    key = _place_local(key, ctx.frame, (local[0], local[1], 0.0))
+    key = place_local(key, ctx.frame, (local[0], local[1], 0.0))
     half_a = _union(half_a, key, "key -> A")
 
     # Socket: the key's *swept* volume as it withdraws along +d, not just its
@@ -520,7 +528,7 @@ def _apply_key(
             (radius + c, z_sweep),
         ]
     )
-    socket = _place_local(socket, ctx.frame, (local[0], local[1], 0.0))
+    socket = place_local(socket, ctx.frame, (local[0], local[1], 0.0))
     half_b = _difference(half_b, socket, "socket -> B")
 
     detail = KeySite(
@@ -813,8 +821,18 @@ def plan_features(
     pour_axis = choose_pour_axis(ctx.cavity, cfg)
     items: list[FeatureItem] = []
 
+    # A core run trims a carrier plate off the cuff end of the block after the
+    # features are cut, so keys have to stay clear of it. Imported here rather
+    # than at module scope: core.py builds on this module's primitives.
+    allow = None
+    if cfg.core.enabled and cfg.carrier.enabled:
+        from . import core as core_mod
+
+        seat, _ = core_mod.plate_planes(ctx.cavity, pour_axis, cfg)
+        allow = core_mod.nodes_below(ctx.surface, pour_axis, seat - cfg.keys.radius)
+
     if cfg.keys.enabled:
-        for n, site in enumerate(find_key_sites(ctx, cfg.keys), start=1):
+        for n, site in enumerate(find_key_sites(ctx, cfg.keys, allow=allow), start=1):
             items.append(
                 FeatureItem(
                     id=f"key-{n}",

@@ -56,6 +56,31 @@ def _config_from_args(args) -> MoldConfig:
         cfg.keys.count = args.keys
     if getattr(args, "vents", None) is not None:
         cfg.vents.count = args.vents
+
+    # A core is opt-in: asking for a wall is what asks for one.
+    if getattr(args, "wall", None) is not None:
+        cfg.core.enabled = True
+        cfg.core.wall = args.wall
+    if getattr(args, "core_faces", None) is not None:
+        cfg.core.faces = args.core_faces
+    if getattr(args, "cuff_depth", None) is not None:
+        cfg.core.cuff_depth = args.cuff_depth
+    if getattr(args, "tabs", None) is not None:
+        cfg.core_tabs.count = args.tabs
+    if getattr(args, "no_tabs", False):
+        cfg.core_tabs.enabled = False
+    if getattr(args, "no_carrier", False):
+        cfg.carrier.enabled = False
+    for target, attr, option in (
+        (cfg.core_tabs, "radius", "tab_radius"),
+        (cfg.carrier, "neck_radius", "neck_radius"),
+        (cfg.carrier, "plate_thickness", "plate_thickness"),
+        (cfg.carrier, "dowel_count", "dowels"),
+        (cfg.carrier, "screw_count", "screws"),
+    ):
+        value = getattr(args, option, None)
+        if value is not None:
+            setattr(target, attr, value)
     # Sizes. Placement stays automatic; these only change how big the knobs and
     # holes it picks come out.
     for target, attr, option in (
@@ -225,6 +250,35 @@ def main(argv: list[str] | None = None) -> int:
         "--spout-outer", type=float, default=None, help="spout radius at the block face, mm"
     )
     sizes.add_argument("--vent-radius", type=float, default=None, help="vent radius, mm")
+
+    core = p_mo.add_argument_group(
+        "hollow cast",
+        "Cast a glove rather than a solid positive: adds a core, a carrier "
+        "plate that registers it to the assembled block, and tabs pinched on "
+        "the parting seam. Off unless --wall is given.",
+    )
+    core.add_argument(
+        "--wall", type=float, default=None,
+        help="glove wall thickness in mm; giving this switches the core on",
+    )
+    core.add_argument(
+        "--core-faces", type=int, default=None,
+        help="face budget the core erosion runs at (the slowest step of a core run)",
+    )
+    core.add_argument(
+        "--cuff-depth", type=float, default=None,
+        help="depth of full-section core at the cuff, i.e. where the glove's rim sits, mm",
+    )
+    core.add_argument("--tabs", type=int, default=None, help="number of seam tabs")
+    core.add_argument("--tab-radius", type=float, default=None, help="seam tab radius, mm")
+    core.add_argument("--neck-radius", type=float, default=None, help="core neck radius, mm")
+    core.add_argument(
+        "--plate-thickness", type=float, default=None, help="carrier plate thickness, mm"
+    )
+    core.add_argument("--dowels", type=int, default=None, help="seam dowels under the plate")
+    core.add_argument("--screws", type=int, default=None, help="clamping screws through the plate")
+    core.add_argument("--no-tabs", action="store_true", help="carrier plate only")
+    core.add_argument("--no-carrier", action="store_true", help="seam tabs only")
     p_mo.add_argument(
         "--plan",
         type=Path,
