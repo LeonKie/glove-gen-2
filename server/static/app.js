@@ -652,6 +652,13 @@ function itemNote(item, st) {
   return { short: text, long: text };
 }
 
+/** What aiming the pour actually changed, which depends on whether it cuts. */
+function aimedMessage() {
+  return itemsOfKind('plate').some((i) => i.enabled)
+    ? 'pour aimed — re-apply to cut the mold that way'
+    : 'pour aimed — re-apply to run the spout that way';
+}
+
 function planDirty(message) {
   say(el.featuresStatus, message || 'edited — re-apply to cut this into the mold');
 }
@@ -806,7 +813,6 @@ function planeHtml(item) {
   if (!span) return '';
   const at = planeOffset(item);
   const [lo, hi] = span;
-  const [tilt, swing] = pourAngles();
   return `
     <div class="ctl plane" data-plane="${esc(item.id)}">
       <span class="lbl">cut at</span>
@@ -815,14 +821,35 @@ function planeHtml(item) {
       <input type="number" min="${fmt(lo)}" max="${fmt(hi)}" step="0.5" value="${fmt(at)}"
              data-plane="${esc(item.id)}" aria-label="cut plane">
       <span class="unit">mm</span>
-    </div>
-    ${angleCtl('tilt', 'tilt', tilt, 0, 60)}
-    ${angleCtl('swing', 'swing', swing, -180, 180)}
-    <p class="ctl-cap aim">
-      The cut is square to the pour axis, and aiming it moves both: the plate is
-      the top of the mold and the port through it is the way in, so which way
-      the mold fills and which way the cut faces are one thing.
-    </p>`;
+    </div>`;
+}
+
+/** The pour axis, which belongs to the plan rather than to anything in it.
+ *
+ *  It decides which way the spout runs and, once there is a plate, which way
+ *  the mold is cut -- so it cannot live on the plate's row, where it would be
+ *  out of reach exactly when there is no plate to hang it on.
+ */
+function aimHtml() {
+  const [tilt, swing] = pourAngles();
+  const off = tilt >= 0.5 ? ` · ${Math.round(tilt)}° off as built` : '';
+  return `
+    <div class="grp aim">
+      <div class="grp-head">
+        <span class="dot pour"></span>
+        <span class="grp-name">Pour axis</span>
+        <span class="count">${esc(off)}</span>
+        <button class="ghost" data-aim-reset title="back to the axis the mold was built with">reset</button>
+      </div>
+      <div class="grp-body">
+        <p class="grp-note">Which way is up when the mold is filled: the spout
+          runs along it, and once there is a carrier plate the cut is square to
+          it, because the plate is the top of the mold and the port through it
+          is the way in. Aiming one aims the other.</p>
+        ${angleCtl('tilt', 'tilt', tilt, 0, 60)}
+        ${angleCtl('swing', 'swing', swing, -180, 180)}
+      </div>
+    </div>`;
 }
 
 /** A row. The selected one is the one being worked on, so it is also the one
@@ -947,8 +974,14 @@ function renderPlan() {
   el.resetPlan.disabled = !state.autoPlan;
   if (!plan) { drawMarkers(); return; }
 
-  const kinds = [...new Set([...KIND_ORDER, ...plan.items.map((i) => i.kind)])];
-  el.featureList.innerHTML = kinds.map(groupHtml).join('');
+  // A mold with no core has nothing for a plate or a tab to attach to, so its
+  // empty core groups are not an invitation, they are noise. Ones that somehow
+  // hold items stay, because a plan carried over from a core mold should show
+  // what is in it rather than hide it.
+  const hasCore = Boolean(state.lastReport?.core);
+  const kinds = [...new Set([...KIND_ORDER, ...plan.items.map((i) => i.kind)])]
+    .filter((k) => hasCore || !CORE_KINDS.has(k) || itemsOfKind(k).length);
+  el.featureList.innerHTML = aimHtml() + kinds.map(groupHtml).join('');
   // "Some of them are on" is not something a checkbox can be told in markup.
   for (const box of el.featureList.querySelectorAll('[data-group-toggle]')) {
     const items = itemsOfKind(box.dataset.groupToggle);
@@ -1019,8 +1052,13 @@ el.featureList.addEventListener('input', (e) => {
         box.value = fmt(planeOffset(plate));
       }
     }
+    // No re-render while a slider is being dragged, so the readout that says
+    // how far it has been aimed is updated by hand.
+    const badge = el.featureList.querySelector('.grp.aim .count');
+    const [now] = pourAngles();
+    if (badge) badge.textContent = now >= 0.5 ? ` · ${Math.round(now)}° off as built` : '';
     drawMarkers();
-    planDirty('pour aimed — re-apply to cut the mold that way');
+    planDirty(aimedMessage());
     return;
   }
   if (t.dataset.plane) {
@@ -1085,7 +1123,11 @@ el.featureList.addEventListener('click', (e) => {
   const button = e.target.closest('button');
   if (button) {
     const d = button.dataset;
-    if (d.add) {
+    if ('aimReset' in d) {
+      setPourAngles(0, 0);
+      renderPlan();
+      planDirty('pour back as built — re-apply to use it');
+    } else if (d.add) {
       setPlacing(state.placing === d.add && !state.movingId ? null : d.add);
     } else if (d.fold) {
       if (!state.folded.delete(d.fold)) state.folded.add(d.fold);
