@@ -191,6 +191,10 @@ def _do_mold(store: Store, job: dict) -> dict:
         "half_a": _write_preview(result.half_a, out_dir / "half_a.bin", PREVIEW_FACES),
         "half_b": _write_preview(result.half_b, out_dir / "half_b.bin", PREVIEW_FACES),
     }
+    if result.core is not None:
+        previews["core"] = _write_preview(
+            result.core, out_dir / "core.bin", PREVIEW_FACES
+        )
     surface = result.mold_result.surface.surface_mesh()
     (out_dir / "parting.bin").write_bytes(
         viewer_format.encode(meshio.decimate(surface, PREVIEW_FACES))

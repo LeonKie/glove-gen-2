@@ -17,6 +17,11 @@ const el = {
   margin: $('margin'), marginVal: $('margin-val'),
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
+  optCore: $('opt-core'), coreOptions: $('core-options'),
+  coreWall: $('core-wall'), coreWallVal: $('core-wall-val'),
+  optCarrier: $('opt-carrier'), optTabs: $('opt-tabs'),
+  coreTabs: $('core-tabs'), coreTabsVal: $('core-tabs-val'), rowCoreTabs: $('row-core-tabs'),
+  coreLocksFeatures: $('core-locks-features'),
   build: $('btn-build'), buildStatus: $('build-status'), buildProgress: $('build-progress'),
   panelFeatures: $('panel-features'), featureList: $('feature-list'),
   resetPlan: $('btn-plan-reset'), optVerify: $('opt-verify'),
@@ -80,7 +85,7 @@ const fill = new THREE.DirectionalLight(0xa8c4e0, 0.6);
 fill.position.set(-1.1, 0.9, -0.6);
 scene.add(fill);
 
-const layers = { part: null, half_a: null, half_b: null, parting: null };
+const layers = { part: null, half_a: null, half_b: null, parting: null, core: null };
 const gizmo = new THREE.Group();
 scene.add(gizmo);
 // Where the knobs and holes are, drawn over whichever layer is showing.
@@ -244,7 +249,7 @@ async function selectMesh(meshId) {
   setLayer('part', buildGeometry(decodeGGM2(buf)));
   frameModel(layers.part.geometry.boundingSphere);
 
-  ['half_a', 'half_b', 'parting'].forEach((k) => disposeLayer(k));
+  ['half_a', 'half_b', 'parting', 'core'].forEach((k) => disposeLayer(k));
   el.layers.querySelectorAll('button').forEach((b) => {
     b.disabled = b.dataset.layer !== 'part';
   });
@@ -1006,6 +1011,20 @@ function pollJob(jobId, { onProgress, onDone, onFail }) {
   }, 700);
 }
 
+/* Seed the core controls from the server's own defaults, so the wall the UI
+ * offers is the wall the CLI would pick rather than a number duplicated here. */
+function adoptCoreDefaults(defaults) {
+  const core = defaults?.core, tabs = defaults?.core_tabs;
+  if (core?.wall) {
+    el.coreWall.value = core.wall;
+    el.coreWallVal.textContent = `${Number(core.wall).toFixed(1)} mm`;
+  }
+  if (tabs?.count) {
+    el.coreTabs.value = tabs.count;
+    el.coreTabsVal.textContent = String(tabs.count);
+  }
+}
+
 function moldConfig() {
   return {
     block_margin: Number(el.margin.value),
@@ -1014,6 +1033,9 @@ function moldConfig() {
     keys: { enabled: el.optKeys.checked },
     spout: { enabled: el.optSpout.checked },
     vents: { enabled: el.optVents.checked },
+    core: { enabled: el.optCore.checked, wall: Number(el.coreWall.value) },
+    carrier: { enabled: el.optCarrier.checked },
+    core_tabs: { enabled: el.optTabs.checked, count: Number(el.coreTabs.value) },
   };
 }
 
@@ -1137,7 +1159,21 @@ async function showResult(job) {
   }
   const skipped = (feat.items || []).filter((i) => i.status === 'skipped').length;
   if (skipped) rows.push(['not placed', skipped, 'bad']);
+  rows.push(...coreRows(r.core));
   statsTable(el.resultStats, rows);
+
+  // A core's neck, dowel bores and tab pockets are cut after the features, so
+  // re-cutting the features alone would give back halves it no longer fits.
+  // The worker refuses; say so here rather than letting them find out.
+  const hasCore = Boolean(r.core);
+  el.coreLocksFeatures.hidden = !hasCore;
+  el.applyFeatures.disabled = hasCore;
+  if (!hasCore) {
+    // Loading a plain job from history after a core one must not leave the
+    // previous core on screen as if it belonged to this mold.
+    disposeLayer('core');
+    el.layers.querySelector('[data-layer="core"]').disabled = true;
+  }
 
   el.downloads.innerHTML = Object.entries(job.parts || {})
     .map(([name, meta]) =>
@@ -1146,7 +1182,12 @@ async function showResult(job) {
     .join('');
   el.panelResult.hidden = false;
 
-  for (const which of ['half_a', 'half_b', 'parting']) {
+  // Only ask for core.bin when the report says there is one. Fetching it
+  // speculatively works — the catch below swallows it — but leaves a 404 in
+  // the console on every ordinary build for someone to chase later.
+  const previews = ['half_a', 'half_b', 'parting'];
+  if (hasCore) previews.push('core');
+  for (const which of previews) {
     try {
       const res = await fetch(`/api/jobs/${job.id}/preview/${which}.bin`);
       if (!res.ok) throw new Error(res.statusText);
@@ -1156,6 +1197,44 @@ async function showResult(job) {
     } catch { /* preview is optional */ }
   }
   showLayer('half_a');
+}
+
+/* What a core run adds to the result table. Everything here is measured
+ * rather than requested: the wall sampled off the core against the cavity, the
+ * core's release from both halves, and the tab volume the cast has to stretch
+ * over on its way off. */
+function coreRows(core) {
+  if (!core) return [];
+  const rows = [];
+  const wall = core.wall;
+  if (wall) {
+    const thin = wall.under_90pct_fraction > 0.001;
+    rows.push(
+      ['wall (median)', `${wall.median_mm.toFixed(2)} of ${wall.target_mm.toFixed(2)} mm`],
+      ['wall (thinnest)', `${wall.min_mm.toFixed(2)} mm`, thin ? 'warn' : 'ok'],
+    );
+    if (thin) {
+      rows.push(['glove under 90% wall', `${(wall.under_90pct_fraction * 100).toFixed(1)}%`, 'warn']);
+    }
+  }
+  if (core.release) {
+    rows.push(['core comes out', core.release.releases ? 'yes' : 'NO',
+      core.release.releases ? 'ok' : 'bad']);
+  }
+  if (core.plate) {
+    rows.push(['carrier plate', `${core.plate.thickness_mm.toFixed(1)} mm, ` +
+      `${core.dowels.length} dowel${core.dowels.length === 1 ? '' : 's'}, ` +
+      `${core.screws.length} screws`]);
+  }
+  const tabs = (core.tabs || []).filter((t) => t.status === 'applied').length;
+  if (core.tabs?.length) {
+    rows.push(['seam tabs', tabs]);
+    // The one cost of option C, and the number that decides whether a given
+    // cast material tolerates it or tears on it.
+    rows.push(['cast stretches over', `${(core.tab_through_wall_mm3 ?? 0).toFixed(0)} mm³`, 'warn']);
+  }
+  for (const s of core.skipped || []) rows.push([`no ${s.what}`, s.reason, 'bad']);
+  return rows;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1208,6 +1287,12 @@ for (const slider of [el.az, el.el]) {
 }
 el.margin.addEventListener('input', () => { el.marginVal.textContent = `${el.margin.value} mm`; });
 el.grid.addEventListener('input', () => { el.gridVal.textContent = el.grid.value; });
+el.coreWall.addEventListener('input', () => {
+  el.coreWallVal.textContent = `${Number(el.coreWall.value).toFixed(1)} mm`;
+});
+el.coreTabs.addEventListener('input', () => { el.coreTabsVal.textContent = el.coreTabs.value; });
+el.optCore.addEventListener('change', () => { el.coreOptions.hidden = !el.optCore.checked; });
+el.optTabs.addEventListener('change', () => { el.rowCoreTabs.hidden = !el.optTabs.checked; });
 
 el.layers.querySelectorAll('button').forEach((b) => {
   b.onclick = () => !b.disabled && showLayer(b.dataset.layer);
@@ -1224,6 +1309,7 @@ el.layers.querySelectorAll('button').forEach((b) => {
     const s = await api('/api/status');
     state.defaults = s.defaults;
     adoptParamBounds(s.feature_params);
+    adoptCoreDefaults(s.defaults);
     el.storeUsage.textContent =
       `${s.storage.meshes} mesh · ${(s.storage.bytes / 1e6).toFixed(0)} MB · ttl ${s.storage.ttl_hours}h`;
   } catch { /* status is cosmetic */ }

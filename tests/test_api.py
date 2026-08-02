@@ -265,6 +265,109 @@ class TestRoundTrip:
         )
         assert res.status_code == 409
 
+    def test_a_core_run_is_served_end_to_end(self, client, part_bytes):
+        """The third body has to reach the browser: preview, download, report."""
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball5.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+
+        job_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 8,
+                    "parting": {"grid": 60},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                    "core": {"enabled": True, "wall": 2.0},
+                    "core_tabs": {"count": 2},
+                },
+            },
+        ).json()["job"]["id"]
+        job = _wait_job(client, job_id)
+        assert job["state"] == "done", job.get("message")
+
+        core = job["result"]["report"]["core"]
+        assert core["wall"]["median_mm"] > 0
+        assert core["release"]["releases"]
+        assert "core" in job["result"]["previews"]
+
+        assert "core.stl" in job["parts"]
+        stl = client.get(f"/api/jobs/{job_id}/files/core.stl")
+        assert stl.status_code == 200 and len(stl.content) > 1000
+        assert client.get(f"/api/jobs/{job_id}/preview/core.bin").status_code == 200
+
+    def test_editing_features_on_a_core_mold_is_refused(self, client, part_bytes):
+        """Not silently allowed: the core's pockets are cut after the features.
+
+        Re-cutting from the cached base halves would hand back a mold the core
+        it was built with no longer fits.
+        """
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball6.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+
+        job_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 8,
+                    "parting": {"grid": 60},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                    "core": {"enabled": True, "wall": 2.0},
+                    "core_tabs": {"enabled": False},
+                },
+            },
+        ).json()["job"]["id"]
+        assert _wait_job(client, job_id)["state"] == "done"
+
+        edit = client.post(
+            "/api/jobs",
+            json={
+                "kind": "features",
+                "config": {"source_job": job_id, "plan": {"items": []}},
+            },
+        )
+        # Accepted then failed, or rejected outright -- either way it must not
+        # come back with a mold.
+        if edit.status_code == 200:
+            failed = _wait_job(client, edit.json()["job"]["id"])
+            assert failed["state"] == "failed"
+            assert "core" in failed.get("message", "").lower()
+        else:
+            assert edit.status_code in (409, 422)
+
+    def test_a_plain_mold_offers_no_core(self, client, part_bytes):
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball7.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+        job_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 8,
+                    "parting": {"grid": 60},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                },
+            },
+        ).json()["job"]["id"]
+        job = _wait_job(client, job_id)
+        assert job["state"] == "done", job.get("message")
+        assert "core" not in job["result"]["report"]
+        assert "core.stl" not in job["parts"]
+        assert client.get(f"/api/jobs/{job_id}/preview/core.bin").status_code == 404
+
     def test_heatmap_rejects_bad_directions(self, client, part_bytes):
         mesh_id = client.post(
             "/api/meshes", files={"file": ("ball2.stl", part_bytes)}

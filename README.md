@@ -31,8 +31,9 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 # plate registered to the assembled block, and tabs pinched on the seam
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
 
-# or use the web app, where the knobs and holes become editable once the
-# mold is built, and re-applying them does not rebuild it
+# or use the web app: "Cast a hollow glove" under Mold turns the core on,
+# the core gets its own viewport layer, and the knobs and holes become
+# editable once the mold is built — re-applying them does not rebuild it
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -370,12 +371,12 @@ offset-shelling approach.
 - **Core runs** add three limits of their own. The erosion is a Minkowski
   difference and dominates the run, so it goes through `core.faces`; the cast
   has to stretch off the seam tabs on its way out, reported as
-  `tab_through_wall_mm3` rather than assumed away; and the web app has no core
-  UI — a mold job accepts `{"core": {"enabled": true}}` and offers `core.stl`
-  for download, but the interactive feature editor refuses to re-cut a mold that
-  has one, because the core's neck, dowel bores and tab pockets are cut after
-  the features and re-cutting from the cached base would hand back halves the
-  core no longer fits.
+  `tab_through_wall_mm3` rather than assumed away; and the
+  interactive feature editor refuses to re-cut a mold that has one, because the
+  core's neck, dowel bores and tab pockets are cut after the features and
+  re-cutting from the cached base would hand back halves the core no longer
+  fits. The app says so and disables the button rather than letting the job
+  fail; changing a knob on a core mold means building again.
 - A box block around a hand-and-forearm scan is ~4.2 L of plastic. Use
   `--block hull`, or crop the scan to the hand.
 - No auto-tiling to a printer bed: the hand mold's halves are ~150 × 78 × 386 mm

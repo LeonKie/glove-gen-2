@@ -343,3 +343,23 @@ select {
 .job-row .s.failed, .job-row .s.interrupted { color: var(--bad); }
 .job-row .s.running, .job-row .s.queued { color: var(--warn); }
 .job-row button { padding: 2px 7px; font-size: 11px; }
+
+/* The hollow-cast options, nested under their own switch. Indented against a
+   rule so the group reads as belonging to the toggle above it, and so the
+   Mold panel does not look twice as long when the core is switched off. */
+.subpanel {
+  margin: 4px 0 14px;
+  padding: 10px 0 2px 12px;
+  border-left: 2px solid var(--line);
+}
+.subpanel label.lead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.subpanel .hint { margin-bottom: 10px; }
+.subpanel .row:last-of-type { margin-bottom: 8px; }
