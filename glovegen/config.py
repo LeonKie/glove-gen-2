@@ -129,47 +129,45 @@ class CoreConfig:
     # 63 s. Raise it when the wall matters more than the minute.
     ball_subdivisions: int = 1
 
-    # Depth of *full-section* core at the cuff, measured down the pour axis.
-    # Above this the core fills the cavity completely, so no cast forms there
-    # and the glove is open across the whole wrist section. Without it the
-    # erosion caps the cuff with a wall-thick membrane.
-    cuff_depth: float = 5.0
 
 
 @dataclass
 class CarrierConfig:
-    """Option B: a carrier plate at the cuff, registered to the assembled block.
+    """The carrier plate, and the plane cut that makes one possible.
 
-    The plate is a slab trimmed off the cuff end of the block perpendicular to
-    the pour axis, and it is printed as one body with the core hanging from it.
-    It locates against the *assembled* block -- dowels straddling the parting
-    seam, so it references both halves equally instead of inheriting one half's
-    key clearance -- and is screwed down, because the load case is a core
-    floating up, not a core sinking.
+    A plate cannot be bolted onto a closed mold: there is nowhere for it to
+    reach the core. So adding one cuts the whole mold along a plane through the
+    core and throws away everything past it -- half A, half B and the core
+    together -- and the plate is a slab of the block's own section laid across
+    the three faces that leaves. It caps the halves, seals the annulus, and
+    swallows the core's stub so plate and core print as one body.
+
+    Off by default: asking for a wall gets you a core and nothing else.
     """
 
-    enabled: bool = True
+    enabled: bool = False
 
-    # Gap between the top of the cavity and the plate's seating face, so the
-    # plate seats on solid mold rather than on the edge of the cuff opening.
-    plate_gap: float = 1.0
+    # How far inside the cavity's far end the plane sits, along the pour axis.
+    # Right at the end the cut face has no area; this much of the scan is
+    # deliberately thrown away to get one.
+    cut_inset: float = 5.0
     plate_thickness: float = 10.0
 
-    # The stem from the core up to the plate. It runs entirely through mold
-    # material above the cavity, so it leaves no witness on the cast.
-    neck_radius: float = 8.0
-    neck_clearance: float = 0.2
-
     dowel_count: int = 2
-    dowel_radius: float = 4.0
+    # A dowel lives in the ring of mold between the cavity's widest section and
+    # the block wall, and needs roughly ``2 * radius + 3`` mm of it: clearance
+    # from the cavity on one side, wall to the block face on the other. At the
+    # default 10 mm block margin a 4 mm pin misses by half a millimetre and no
+    # position on the seam qualifies, so the default is a size that fits.
+    dowel_radius: float = 3.0
     dowel_depth: float = 12.0
     dowel_clearance: float = 0.15
-    # At the cuff the cavity's ceiling is a millimetre under the seating face,
-    # so a bore's usable depth is whatever the cavity leaves rather than
+    # The plane cuts *through* the part, so at the cut face the cavity wall is
+    # right there and a bore's usable depth is whatever it leaves rather than
     # whatever was asked for. Half a diameter still registers in plastic; below
     # that a pin is decoration. A block margin close to the dowel diameter is
-    # what usually forces the compromise -- there is then no position both
-    # clear of the cavity and inside the plate's edge.
+    # what usually forces the compromise -- there is then no position both clear
+    # of the cavity and inside the plate's edge.
     dowel_min_depth: float = 5.0
     # Two dowels this much closer together than the seam is long are not two
     # dowels; they are one dowel and a wobble.
@@ -180,6 +178,12 @@ class CarrierConfig:
     screw_depth: float = 14.0
     screw_min_depth: float = 6.0
     screw_clearance: float = 0.4  # added for the through-hole in the plate
+
+    # The pour port: a funnel through the plate down to the ring of cast at the
+    # cut face. Sealing the annulus is what makes it necessary, and the ring is
+    # only a wall thick, so the inner end necks down to roughly that.
+    port_inner_radius: float = 2.5
+    port_outer_radius: float = 9.0
 
     # How far a bore's axis may drift off the parting surface over its length
     # before its half-round groove stops being widest at its mouth -- past this
@@ -195,10 +199,10 @@ class CoreTabConfig:
     solid on both sides of the parting face, where closing the halves pinches
     it. Cut on the parting surface it obeys the same groove rule as an
     alignment key, and its witness mark lands on the seam that gets trimmed
-    anyway.
+    anyway. Off by default, like the plate.
     """
 
-    enabled: bool = True
+    enabled: bool = False
     count: int = 4
     radius: float = 3.0
     clearance: float = 0.2

@@ -158,7 +158,7 @@ class TestApplyFeatures:
         cfg = MoldConfig(block_margin=8.0, pour_axis=(0.0, 0.0, 1.0))
         cfg.parting.grid = 110
         res = mold.build_mold(taper, [1, 0, 0], cfg)
-        a, b, rep = features.apply_features(res, taper, cfg)
+        (a, b, _), rep = features.apply_features(res, taper, cfg)
         return res, a, b, rep
 
     def test_keys_are_placed_and_spread_out(self, built):
@@ -199,7 +199,7 @@ class TestApplyFeatures:
         cfg.parting.grid = 90
         cfg.keys.enabled = cfg.spout.enabled = cfg.vents.enabled = False
         res = mold.build_mold(taper, [1, 0, 0], cfg)
-        a, b, rep = features.apply_features(res, taper, cfg)
+        (a, b, _), rep = features.apply_features(res, taper, cfg)
         assert a is res.half_a and b is res.half_b
         assert rep.keys == {} and rep.spout == {} and rep.vents == {}
 
@@ -232,7 +232,7 @@ class TestApplyEditedPlan:
         edited = plan.as_dict()
         for item in edited["items"]:
             item["enabled"] = item["kind"] != "key"
-        a, b, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        (a, b, _), rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
         assert rep.keys["count"] == 0
         assert {i["status"] for i in rep.items if i["kind"] == "key"} == {"off"}
         # no keys added to A means A is only smaller than the base, never larger
@@ -246,7 +246,7 @@ class TestApplyEditedPlan:
             edited["items"] = [i for i in edited["items"] if i["kind"] == "key"]
             for item in edited["items"]:
                 item["params"]["radius"] = radius
-            a, _, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+            (a, _, _), rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
             assert rep.keys["count"] == len(edited["items"])
             return a.volume
 
@@ -266,7 +266,7 @@ class TestApplyEditedPlan:
                 }
             ],
         }
-        a, b, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        (a, b, _), rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
         assert a is res.half_a and b is res.half_b  # nothing was cut
         (entry,) = rep.items
         assert entry["status"] == "skipped"
@@ -287,7 +287,7 @@ class TestApplyEditedPlan:
                 }
             ],
         }
-        a, b, rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        (a, b, _), rep = features.apply_plan(res.half_a, res.half_b, ctx, edited)
         assert rep.items[0]["status"] == "applied"
         assert rep.keys["count"] == 1 and rep.keys["radius_mm"] == 4.0
         assert a.volume > res.half_a.volume and b.volume < res.half_b.volume
@@ -301,7 +301,7 @@ class TestApplyEditedPlan:
                 item["params"]["height"] = 6.0
             if item["kind"] == "spout":
                 item["params"]["outer_radius"] = 12.0
-        a, b, _ = features.apply_plan(res.half_a, res.half_b, ctx, edited)
+        (a, b, _), _ = features.apply_plan(res.half_a, res.half_b, ctx, edited)
         for half in (a, b):
             assert validate.solid_report(half)["boundary_edges"] == 0
         assert validate.separation_report(a, b, taper, res.direction)["opens"]
