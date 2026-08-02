@@ -89,23 +89,24 @@
           </div>
           <div class="row checks">
             <label>
-              <input type="checkbox" id="opt-carrier" checked>
-              Carrier plate at the cuff
+              <input type="checkbox" id="opt-carrier">
+              Propose a carrier plate
             </label>
             <label>
-              <input type="checkbox" id="opt-tabs" checked>
-              Tabs pinched on the parting seam
+              <input type="checkbox" id="opt-tabs">
+              Propose seam tabs
             </label>
           </div>
-          <div class="row" id="row-core-tabs">
+          <div class="row" id="row-core-tabs" hidden>
             <label for="core-tabs">Seam tabs <span class="val" id="core-tabs-val">4</span></label>
             <input type="range" id="core-tabs" min="1" max="8" step="1" value="4">
           </div>
           <p class="hint">
-            The plate registers to the <i>assembled</i> block and takes the
-            buoyancy; the tabs brace the cantilever the plate leaves. A tab
-            crosses the glove wall, so the cast has to stretch off it — the
-            result says by how much.
+            A plate <b>cuts the mold</b> on a plane through the core and throws
+            away everything past it — half A, half B and the core alike — then
+            caps what is left and registers to the block by seam dowels. Tabs
+            brace the cantilever it leaves, at the cost of a slot through the
+            glove wall. Both become rows below, where the plane can be moved.
           </p>
         </div>
       </div>
@@ -127,11 +128,6 @@
         <div class="row checks">
           <label><input type="checkbox" id="opt-verify" checked> Check the mold still opens</label>
         </div>
-        <p class="hint" id="core-locks-features" hidden>
-          This mold has a core. Its neck, dowel bores and tab pockets are cut
-          <i>after</i> the features, so re-cutting the features alone would hand
-          back halves the core no longer fits. Change a knob and build again.
-        </p>
         <button class="primary big" id="btn-apply-features">Re-apply features</button>
         <div id="features-status" class="status" hidden></div>
         <div id="features-progress" class="progress" hidden><div class="bar"></div></div>

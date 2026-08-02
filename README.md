@@ -27,13 +27,16 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --key-radius 7 --spout-outer 1
 # or hand it the plan from a previous run, edited
 glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 
-# cast a hollow glove instead of a solid positive: adds core.stl, a carrier
-# plate registered to the assembled block, and tabs pinched on the seam
+# cast a hollow glove instead of a solid positive. --wall adds core.stl and
+# nothing else; --plate cuts the mold on a plane and caps it, --tabs pinches
+# the core on the parting seam
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
+glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5 --plate --tabs 4
 
-# or use the web app: "Cast a hollow glove" under Mold turns the core on,
-# the core gets its own viewport layer, and the knobs and holes become
-# editable once the mold is built — re-applying them does not rebuild it
+# or use the web app: "Cast a hollow glove" under Mold turns the core on, the
+# plate and the tabs are opt-in beside it, and every one of them becomes an
+# editable row once the mold is built — including a slider for where the
+# plate's plane cuts. Re-applying does not rebuild the mold or the core.
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -210,10 +213,12 @@ reason to throw away a mold that took a minute to build.
 
 Everything above casts a **solid** positive. A glove is a wall, so it needs a
 second body inside the cavity — the core — with the cast forming in the gap.
-`--wall 2.5` switches that on.
+`--wall 2.5` switches that on, and adds nothing else.
 
 ```bash
-glovegen mold scan.stl -o out/ --wall 2.5      # adds core.stl to the output
+glovegen mold scan.stl -o out/ --wall 2.5            # core.stl, and that is all
+glovegen mold scan.stl -o out/ --wall 2.5 --plate    # ...cut and capped
+glovegen mold scan.stl -o out/ --wall 2.5 --plate --tabs 4
 ```
 
 The wall is then only as good as the core's position, and a core that is merely
@@ -223,21 +228,35 @@ about **7.7 N of buoyancy** against maybe 1.5 N of self-weight. It floats, and
 the wall goes thin on top before it goes thick underneath. Gravity seating is
 not a fixation scheme.
 
-**The core body** is the part eroded by the wall — a Minkowski *difference*
-against a ball, the exact inverse of `cavity_offset`, run on a decimated copy
-because it scales badly with face count. Eroding alone would cap the wrist with
-a wall-thick membrane and give you a bladder, so the core is unioned with the
-full-section slab above a **cuff plane**: there it fills the cavity completely,
-no cast forms, and the glove is open across the whole wrist section. That
-shut-off is also how a real cuff edge gets formed.
+The core body is the part eroded by the wall — a Minkowski *difference* against
+a ball, the exact inverse of `cavity_offset`, run on a decimated copy because it
+scales badly with face count.
 
-**The carrier plate** is a slab trimmed off the cuff end of the block
-perpendicular to the pour axis, printed as one body with the core hanging
-beneath it. Three details earn it its keep:
+#### The plate is a plane cut
 
-- it is the cap of the **already-featured** mold, so the pour spout and any vent
-  leaving through the cuff face are already ports through it — the plate is
-  trimmed after the features are cut, not before;
+A plate cannot be bolted onto a closed mold: there is nowhere for it to reach
+the core. So adding one **cuts the whole mold** along a plane through the core
+and throws away everything past it — half A, half B and the core together.
+
+```
+half_a = half_a − beyond      core  = core − beyond      (a merge depth further)
+half_b = half_b − beyond      plate = block ∩ slab(plane, plane + thickness)
+core_assembly = core ∪ plate ∪ dowels ∪ tabs
+```
+
+That leaves three coplanar faces, and the plate is a slab of the block's own
+cross-section laid across all of them: it caps the halves, spans the annulus so
+the cast is sealed in, and swallows the core's stub so the two print as one
+body. **The glove's rim is exactly the cut** — no separate cuff logic, because
+the plane does that job too.
+
+The core is trimmed a merge depth *above* the plane rather than at it. The stub
+that leaves sticking up is inside the plate, which turns the union of core and
+plate from a coplanar boolean into an overlapping one, and the space it occupies
+is space the halves have just vacated, so nothing can foul on it.
+
+Two more details earn the plate its keep:
+
 - its dowels **straddle the parting seam**, symmetric about it, so the plate
   references both halves equally and self-centres instead of inheriting one
   half's key clearance. Registering to one half would put the core's position
@@ -246,51 +265,74 @@ beneath it. Three details earn it its keep:
   down and leaves the other loose.
 
 The block's pull frame is rolled to line up with the pour axis when a core is
-asked for, so a box block has two faces square to the trim plane. Without that,
-slicing an arbitrarily-rolled box on an oblique plane gives a corner wedge.
+asked for, so a box block has two faces square to the cut. Without that, slicing
+an arbitrarily-rolled box on an oblique plane gives a corner wedge.
 
-**Seam tabs** take the moment the plate cannot — the core still hangs off it as
-a cantilever, and tip deflection goes as length cubed. Each tab is a post from
-the core out past the cast silhouette into mold that is solid on both sides of
-the parting face, where closing the halves pinches it. Placement is the
-alignment-key logic run in reverse: a key wants a column that *misses* the part,
-a tab wants an outer end in one of those and an inner end where the parting
-surface runs inside the core, and one distance transform away from the core
-gives every free node both its nearest core node and the run between them.
+#### Sealing the annulus means the pour moves
+
+With the plate on, the cavity's high point along the pour axis *is* the cut
+face, and the plate covers it. A spout aimed there would be cut into material
+the plane is about to discard, so with a plate in the plan the spout is replaced
+by a **port**: a funnel through the plate down to the ring of cast at the cut
+face. The ring is only a wall thick, so the funnel necks down to meet it.
+
+#### Seam tabs
+
+The plate owns gross position but the core still hangs off it as a cantilever,
+and tip deflection goes as length cubed. A tab is a post from the core out past
+the cast silhouette into mold that is solid on both sides of the parting face,
+where closing the halves pinches it. Placement is the alignment-key logic run in
+reverse: a key wants a column that *misses* the part, a tab wants an outer end
+in one of those and an inner end where the parting surface runs inside the core,
+and one distance transform away from the core gives every free node both its
+nearest core node and the run between them.
 
 #### The invariant that makes the assembly exist
 
-**Every core-side feature is centred on the parting surface** — tabs, dowels and
-the neck alike. That is not tidiness, it is what makes an assembly sequence
-possible at all. Each leaves a half-round groove in either half, widest exactly
-at its mouth, so the whole core assembly lifts straight out of half B along
-`+d`. Put a dowel wholly inside one half instead and it has to be inserted along
-the pour axis — which the tabs, trapped sideways in their grooves, make
-impossible. Options B and C are only compatible because both obey the rule the
-alignment keys already obey.
+**Every core-side feature is centred on the parting surface** — tabs and dowels
+alike. That is not tidiness, it is what makes an assembly sequence possible at
+all. Each leaves a half-round groove in either half, widest exactly at its
+mouth, so the whole core assembly lifts straight out of half B along `+d`. Put a
+dowel wholly inside one half instead and it has to be inserted along the pour
+axis — which the tabs, trapped sideways in their grooves, make impossible. Plate
+and tabs are only compatible because both obey the rule the alignment keys
+already obey.
 
 So the sequence is the ordinary one: core into half B, half A down on top,
 screws through the plate.
 
-Because a straight bore in a *curved* parting surface only obeys the rule
+Because a straight bore in a *curved* parting surface only obeys that rule
 approximately, every bore's **seam drift** is measured and anything past
 `max_seam_drift` is skipped with the number in the reason, rather than silently
-cut as a groove wider inside than at its mouth.
+cut as a groove wider inside than at its mouth. Bore depth is measured too: the
+plane cuts *through* the part, so at the cut face the cavity wall is right there
+and a fixed 12 mm dowel would be rejected at every position on the seam. Each
+bore gets whatever depth the cavity leaves, down to half a diameter.
+
+#### The plate, the dowels and the tabs are ordinary plan items
+
+`plate`, `dowel`, `screw`, `port` and `core_tab` are feature-plan kinds beside
+`key`, `spout` and `vent` — same positions, same clamped sizes, same
+skipped-with-a-reason handling, same editor, same `--plan` round trip. A second
+parallel plan document would have been a worse version of the one that already
+exists. `apply_plan` returns a `Bodies` rather than a pair of halves, because
+the plan now builds the core as well as cutting the mold.
+
+The core is built *before* the plan, not after: the plate has to have something
+to attach to before it can be placed, and placement is staged against the
+geometry the cut will leave rather than the geometry as it stands. The erosion
+depends on nothing the plan decides, so it is cached with the base halves and an
+edited plan — including a moved plane — re-cuts without eroding again.
 
 #### What it does not solve, and says so
 
 Tabs stick out sideways through the glove wall, so withdrawing the core along
 the cuff axis drags them through the slots they made. On a flexible cast that
-stretches; on a stiff one it tears. The report gives
-`tab_through_wall_mm3` — the tab volume actually sitting in the cast — so the
-trade is a number, not a hope. `--no-tabs` gives the plate alone.
+stretches; on a stiff one it tears. The report gives `tab_through_wall_mm3` —
+the tab volume actually sitting in the cast — so the trade is a number, not a
+hope. Leave the tabs off for the plate alone.
 
-Bore depth is measured, not assumed, for the same reason: at the cuff the
-cavity's ceiling is a millimetre under the plate's seating face, so a fixed
-12 mm dowel would be rejected at every position on the seam. Each bore gets
-whatever depth the cavity leaves, down to a floor of half a diameter.
-
-And the wall itself is measured — sampled off the core's surface against the
+The wall itself is measured too, sampled off the core's surface against the
 cavity's, which is what the wall *is*. On a 13k-face hand-shaped test part at a
 2.5 mm target:
 
@@ -303,12 +345,11 @@ The shortfall is the eroding ball's tessellation, which undershoots at its facet
 centres and never overshoots: `ball_subdivisions` 1 costs 6.5% of the wall in
 17 s, 2 costs 1.8% in 27 s, 3 costs 0.4% in 63 s.
 
-Two interactions worth knowing. `--block hull` ends the block in a dome, so the
-plate is trimmed from a small cap of it — on the test part 4 cm³ and one dowel,
-against 68 cm³ and two with a box block. And the exclusion around the cuff has
-to sit a wall *below* the rim, not at it: the shut-off disc meets the cavity at
-its edge, so sampling the rim itself reports a 0.8 mm wall that is not a thin
-spot in the glove but the hole the hand goes through.
+Two interactions worth knowing. `--block hull` ends the block in a dome, so a
+plate cut near the end is trimmed from a small cap of it. And a dowel lives in
+the ring of mold between the cavity's widest section and the block wall, needing
+roughly `2 × radius + 3` mm of it — which is why the default pin is 3 mm and not
+4 at a 10 mm block margin.
 
 ### 7. Verification
 
@@ -368,15 +409,13 @@ offset-shelling approach.
 
 - Residual undercuts are reported, not eliminated. There is no N-part split;
   the design assumes a flexible cast material.
-- **Core runs** add three limits of their own. The erosion is a Minkowski
-  difference and dominates the run, so it goes through `core.faces`; the cast
-  has to stretch off the seam tabs on its way out, reported as
-  `tab_through_wall_mm3` rather than assumed away; and the
-  interactive feature editor refuses to re-cut a mold that has one, because the
-  core's neck, dowel bores and tab pockets are cut after the features and
-  re-cutting from the cached base would hand back halves the core no longer
-  fits. The app says so and disables the button rather than letting the job
-  fail; changing a knob on a core mold means building again.
+- **Core runs** add two limits of their own. The erosion is a Minkowski
+  difference and dominates the run, so it goes through `core.faces`; and the
+  cast has to stretch off any seam tabs on its way out, reported as
+  `tab_through_wall_mm3` rather than assumed away.
+- A carrier plate **throws away** everything past its plane, from the scan as
+  well as from the mold. That is the point, but the discarded volume is
+  reported so it is never a surprise.
 - A box block around a hand-and-forearm scan is ~4.2 L of plastic. Use
   `--block hull`, or crop the scan to the hand.
 - No auto-tiling to a printer bed: the hand mold's halves are ~150 × 78 × 386 mm
@@ -395,7 +434,7 @@ glovegen/
   parting.py        constrained height field -> parting surface + solid
   mold.py           block, block−part, the split
   features.py       the feature plan: choosing keys/spout/vents, and cutting them
-  core.py           hollow-cast core: erosion, carrier plate, seam tabs
+  core.py           hollow-cast core: erosion, the plane cut, plate and tabs
   pipeline.py       orchestration + reporting, and re-cutting an edited plan
   validate.py       solid gating, separation measurement
   cli.py            glovegen analyze | mold
@@ -481,9 +520,10 @@ second copy of either doubles the memory peak.
 ## Configuration
 
 A core is off unless asked for: `--wall` on the command line, or
-`{"core": {"enabled": true, "wall": 2.5}}` in a job config. `carrier` and
-`core_tabs` hold the two fixation schemes and are both on once a core exists,
-so `--no-tabs` and `--no-carrier` are how you get one without the other.
+`{"core": {"enabled": true, "wall": 2.5}}` in a job config. The plate and the
+tabs are off on top of that — `carrier.enabled` and `core_tabs.enabled`, or
+`--plate` and `--tabs N` — so a wall on its own gets you a core and leaves the
+mold alone.
 
 Environment: `GLOVEGEN_STORE` (default `data/store`, `/data/store` in the
 image), `GLOVEGEN_TTL_HOURS` (24), `GLOVEGEN_MAX_UPLOAD_MB` (400),

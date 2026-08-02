@@ -521,6 +521,11 @@ def apply_plate(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
     section laid across all of them, so it caps the halves, seals the annulus
     and swallows the core's stub in one body.
     """
+    if state.has_plate:
+        raise FeatureSkipped(
+            f"the mold is already cut at {state.plane:.0f} mm; a second plane "
+            "would cut away the plate that is already there"
+        )
     thickness = float(item.params["thickness"])
     stage_plate(ctx, item.position, thickness, state)
 

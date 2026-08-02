@@ -138,6 +138,24 @@ class TestThePlaneCut:
         assert entry["status"] == "skipped"
         assert "outside the block" in entry["reason"]
 
+    def test_a_second_plate_is_refused(self, taper, full_config):
+        """"+ add" makes two easy, and the second would cut away the first."""
+        built = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)
+        plan = built.feature_plan.as_dict()
+        p = unit(plan["pour_axis"])
+        original = next(i for i in plan["items"] if i["kind"] == "plate")
+        plan["items"].append(
+            {
+                **original,
+                "id": "plate-2",
+                "position": list(np.asarray(original["position"]) - p * 8.0),
+            }
+        )
+        out = pipeline.run(taper, full_config, direction=[1, 0, 0], plan=plan, verify=False)
+        entries = [i for i in out.feature_report.items if i["kind"] == "plate"]
+        assert [e["status"] for e in entries] == ["applied", "skipped"]
+        assert "already cut" in entries[1]["reason"]
+
     def test_the_things_that_stand_on_the_plate_go_with_it(self, taper, full_config):
         """A dowel with no plate is not a dowel, and says so rather than crashing."""
         built = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)
