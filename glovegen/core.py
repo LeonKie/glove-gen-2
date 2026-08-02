@@ -798,16 +798,23 @@ def _measure_wall(
     cavity: trimesh.Trimesh,
     pour_axis,
     cut: float,
+    target_mm: float,
     *,
     samples: int = 4000,
 ) -> dict:
     """Measured wall thickness, not assumed.
 
-    Distance from points on the core's surface to the cavity's surface *is* the
-    wall, so this checks the erosion actually delivered what was asked and says
-    how much the tessellation of the eroding ball cost. Points above the cuff
-    plane are excluded: the core deliberately touches the cavity there to open
-    the glove, and a shut-off reads as zero wall.
+    Distance from a point on the core's surface to the cavity's surface *is* the
+    wall there, so this checks the erosion delivered what was asked and prices
+    the eroding ball's tessellation: a polyhedral ball undershoots at its facet
+    centres and never overshoots, costing about 6.5% of the wall at
+    ``ball_subdivisions=1``, 1.8% at 2 and 0.4% at 3.
+
+    ``cut`` excludes the cuff, and has to sit a wall *below* the rim rather than
+    at it. Above the rim the core deliberately touches the cavity to open the
+    glove, and the shut-off disc meets that wall at its edge -- sample a point
+    on the rim itself and it reads as near-zero wall, which is not a thin spot
+    in the glove but the hole the hand goes through.
     """
     pts = core_body.sample(int(samples))
     keep = (pts @ unit(pour_axis)) < cut
@@ -815,12 +822,16 @@ def _measure_wall(
         return {}
     pts = pts[keep]
     dist = trimesh.proximity.closest_point(cavity, pts)[1]
+    target = float(target_mm)
     return {
-        "target_mm": None,  # filled in by the caller
+        "target_mm": round(target, 3),
         "min_mm": round(float(dist.min()), 3),
         "p05_mm": round(float(np.percentile(dist, 5)), 3),
         "median_mm": round(float(np.median(dist)), 3),
         "max_mm": round(float(dist.max()), 3),
+        # A single worst sample says nothing about how much of the glove is
+        # thin. This does, and it is the number to act on.
+        "under_90pct_fraction": round(float((dist < 0.9 * target).mean()), 5),
         "samples": int(len(pts)),
     }
 
@@ -1052,9 +1063,14 @@ def fixate(
     if verify:
         report_progress(0.9, "measuring the wall and the core's release")
         t0 = time.time()
-        wall = _measure_wall(core_body, cavity, p, cuff_offset(cavity, p, cfg))
+        wall = _measure_wall(
+            core_body,
+            cavity,
+            p,
+            cuff_offset(cavity, p, cfg) - cfg.core.wall,
+            cfg.core.wall,
+        )
         if wall:
-            wall["target_mm"] = round(float(cfg.core.wall), 3)
             out["wall"] = wall
         out["release"] = release_report(assembly, half_a, half_b, ctx.direction)
         if tab_solids:

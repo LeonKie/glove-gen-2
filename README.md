@@ -27,6 +27,10 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --key-radius 7 --spout-outer 1
 # or hand it the plan from a previous run, edited
 glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 
+# cast a hollow glove instead of a solid positive: adds core.stl, a carrier
+# plate registered to the assembled block, and tabs pinched on the seam
+glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
+
 # or use the web app, where the knobs and holes become editable once the
 # mold is built, and re-applying them does not rebuild it
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
@@ -284,6 +288,26 @@ Bore depth is measured, not assumed, for the same reason: at the cuff the
 cavity's ceiling is a millimetre under the plate's seating face, so a fixed
 12 mm dowel would be rejected at every position on the seam. Each bore gets
 whatever depth the cavity leaves, down to a floor of half a diameter.
+
+And the wall itself is measured — sampled off the core's surface against the
+cavity's, which is what the wall *is*. On a 13k-face hand-shaped test part at a
+2.5 mm target:
+
+```
+core erosion 16.2s · plate 0.3s · tabs 4.2s · fuse 0.1s · verify 0.7s
+wall  min 2.34  p05 2.37  median 2.50  max 2.50 mm,  0% under 90% of target
+```
+
+The shortfall is the eroding ball's tessellation, which undershoots at its facet
+centres and never overshoots: `ball_subdivisions` 1 costs 6.5% of the wall in
+17 s, 2 costs 1.8% in 27 s, 3 costs 0.4% in 63 s.
+
+Two interactions worth knowing. `--block hull` ends the block in a dome, so the
+plate is trimmed from a small cap of it — on the test part 4 cm³ and one dowel,
+against 68 cm³ and two with a box block. And the exclusion around the cuff has
+to sit a wall *below* the rim, not at it: the shut-off disc meets the cavity at
+its edge, so sampling the rim itself reports a 0.8 mm wall that is not a thin
+spot in the glove but the hole the hand goes through.
 
 ### 7. Verification
 

@@ -124,8 +124,9 @@ class CoreConfig:
     faces: int | None = 40_000
 
     # Tessellation of the eroding ball. A polyhedral ball undershoots the wall
-    # at its facet centres: 1 costs about 4% of the wall, 2 about 1.5%, at
-    # roughly 1.5x the time.
+    # at its facet centres and never overshoots. Measured on a 13k-face hand:
+    # 1 costs 6.5% of the wall in 17 s, 2 costs 1.8% in 27 s, 3 costs 0.4% in
+    # 63 s. Raise it when the wall matters more than the minute.
     ball_subdivisions: int = 1
 
     # Depth of *full-section* core at the cuff, measured down the pour axis.

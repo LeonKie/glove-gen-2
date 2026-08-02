@@ -172,6 +172,18 @@ class TestFixated:
         # The eroding ball undershoots at its facet centres and never overshoots.
         assert wall["max_mm"] <= wall["target_mm"] + 1e-3
         assert wall["min_mm"] >= wall["target_mm"] * 0.9
+        assert wall["under_90pct_fraction"] == 0.0
+
+    def test_the_cuff_rim_is_not_measured_as_a_thin_wall(self, built):
+        """Regression: the shut-off disc meets the cavity at its edge.
+
+        Sampling right up to the rim reported a 0.8 mm wall against a 2.5 mm
+        target on a hand-shaped part -- not a thin spot in the glove, but the
+        hole the hand goes through. The exclusion has to sit a wall below the
+        rim, not at it.
+        """
+        wall = built.report()["core"]["wall"]
+        assert wall["min_mm"] > 0.5 * wall["target_mm"]
 
     def test_the_core_releases_from_both_halves(self, built):
         """The whole point of centring every core feature on the parting surface.
