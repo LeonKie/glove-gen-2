@@ -303,10 +303,65 @@ function frameModel(sphere) {
   controls.target.copy(sphere.center);
   camera.near = r / 200;
   camera.far = r * 60;
-  camera.position.copy(sphere.center).add(new THREE.Vector3(r * 1.5, -r * 1.7, r * 1.1));
+  // Far enough back that the bounding sphere fits the vertical field of view
+  // with a little air. Standing the part up puts its long axis on the short
+  // screen axis, so an eyeballed distance clips it.
+  const fit = (r / Math.sin((camera.fov * Math.PI) / 360)) * 1.15;
+  camera.position
+    .copy(sphere.center)
+    .add(new THREE.Vector3(1.5, -1.7, 1.1).normalize().multiplyScalar(fit));
   camera.updateProjectionMatrix();
   controls.update();
   buildGizmo(sphere);
+  standUp(currentDirection());
+}
+
+/* ---- standing the part up ----
+ *
+ * The pull direction is the one axis the whole build turns on, and reading it
+ * off an arrow is a translation step every time. So the view carries it
+ * instead: the camera is rolled until the pull points up the screen, and the
+ * part is simply *seen* standing the way the halves will come off it. Nothing
+ * is baked into the mesh -- the rotation stays where it always was, in the
+ * job's frame -- so outputs keep the scan's coordinates and changing the pull
+ * costs a camera move rather than a re-prepare.
+ *
+ * With ``camera.up`` on the pull axis, orbiting sideways spins around it and
+ * leaves it up; orbiting over the top tilts it away, which is what the
+ * pour-axis picker reads.
+ */
+function standUp(d) {
+  const up = new THREE.Vector3(d.x, d.y, d.z);
+  if (up.lengthSq() < 1e-9) return;
+  up.normalize();
+
+  const t = controls.target;
+  const offset = camera.position.clone().sub(t);
+  const dist = Math.max(offset.length(), 1);
+  // Keep standing roughly where we were standing: only the part of the offset
+  // across the new up survives. Looking straight down it leaves nothing, so
+  // then any perpendicular will do.
+  const side = offset.addScaledVector(up, -offset.dot(up));
+  if (side.lengthSq() < 1e-6 * dist * dist) {
+    side.crossVectors(up, new THREE.Vector3(0, 0, 1));
+    if (side.lengthSq() < 1e-9) side.crossVectors(up, new THREE.Vector3(1, 0, 0));
+  }
+
+  camera.up.copy(up);
+  // OrbitControls snapshots the orbit axis from camera.up when it is built,
+  // so moving the axis means refreshing that snapshot too.
+  if (controls._quat) {
+    controls._quat.setFromUnitVectors(up, new THREE.Vector3(0, 1, 0));
+    controls._quatInverse.copy(controls._quat).invert();
+  }
+  camera.position.copy(t).add(side.normalize().multiplyScalar(dist));
+  camera.lookAt(t);
+  controls.update();
+}
+
+/** Which way is up on screen right now, as a world vector. */
+function viewUp() {
+  return new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
 }
 
 /* ------------------------------------------------------------------ *
@@ -335,6 +390,7 @@ function syncDirLabels() {
   el.elVal.textContent = `${el.el.value}°`;
   orientGizmo();
   const d = currentDirection();
+  standUp(d);
   el.hud.textContent = `d = (${d.x.toFixed(3)}, ${d.y.toFixed(3)}, ${d.z.toFixed(3)})`;
 }
 
@@ -1426,8 +1482,11 @@ el.suggest.onclick = async () => {
 };
 
 el.fromView.onclick = () => {
-  const d = new THREE.Vector3().subVectors(controls.target, camera.position).normalize();
-  setDirection([d.x, d.y, d.z]);
+  // The inverse of standing the part up: tumble it until it sits the way you
+  // want it pulled, press, and the frame takes whatever is now up on screen.
+  // (The view then snaps to that exactly, which from here is a small move.)
+  const up = viewUp();
+  setDirection([up.x, up.y, up.z]);
   requestHeatmap();
 };
 
@@ -1451,8 +1510,10 @@ function setPourChoice(axis) {
 
 el.pourFromView.onclick = () => {
   // Up on screen, not the way the camera looks: the pour axis is which way is
-  // up when the mold is stood on the bench and filled.
-  const up = camera.up.clone().applyQuaternion(camera.quaternion).normalize();
+  // up when the mold is stood on the bench and filled. Straight after a pull
+  // direction is set that *is* the pull axis, since the view stands the part
+  // up along it -- orbit over the top first to aim somewhere else.
+  const up = viewUp();
   setPourChoice([up.x, up.y, up.z]);
 };
 

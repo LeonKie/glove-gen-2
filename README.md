@@ -90,6 +90,17 @@ Sanity check that the crossing model is right: summing the *material* intervals
 instead of the gaps reproduces `mesh.volume` to 0.1% on every test shape, and
 exactly (708.12 cm³) on the hand.
 
+**In the viewer, `d` is up.** Rather than draw an arrow and leave you to decode
+which way the halves come off, the camera is rolled so the pull direction points
+up the screen: the part is simply *seen* standing the way it will be pulled.
+Nothing is baked into the mesh — `d` stays where it always was, in the job's
+frame, so the outputs keep the scan's coordinates and changing the pull costs a
+camera move rather than re-loading and re-decimating a two-million-triangle
+scan. `camera.up` rides on `d`, so orbiting sideways spins around the pull axis
+and leaves it upright; orbiting over the top tilts it away, and **From view up**
+is the way back — tumble the part to how you want it pulled, press, and the
+frame takes whatever is now up on screen.
+
 ### 2. Parting surface
 
 The parting surface is a **height field** `z = h(x, y)` in the frame where `d` is
