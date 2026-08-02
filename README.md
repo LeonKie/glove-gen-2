@@ -34,10 +34,9 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5 --plate --dowels 2
 
-# or use the web app: "Cast a hollow glove" under Mold turns the core on, the
-# plate, dowels and tabs are opt-in beside it, and every one of them becomes
-# an editable row once the mold is built — including sliders for where the
-# cut falls and which way it faces. Re-applying does not rebuild the mold.
+# or use the web app: aim the pour axis and turn on "Cast a hollow glove"
+# under Mold, then every knob, hole and core part becomes an editable row once
+# the mold is built. Re-applying does not rebuild the mold or the core.
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -256,13 +255,18 @@ that leaves sticking up is inside the plate, which turns the union of core and
 plate from a coplanar boolean into an overlapping one, and the space it occupies
 is space the halves have just vacated, so nothing can foul on it.
 
-**The cut is square to the pour axis, and there is only one of each.** Those two
-facts are the same fact. The plate is the top of the mold and the port through
-it is the way in, so which way the mold fills and which way the cut faces cannot
-sensibly differ — aiming one aims the other, and the plan carries a single
-`pour_axis` rather than a plate normal beside it. And a second plate's plane
-would slice away the plate the first one made, so the editor does not offer one
-and the pass refuses it if a hand-edited plan contains it anyway.
+**The cut is square to the pour axis, and there is only one of each.** The plate
+is the top of the mold and the port through it is the way in, so which way the
+mold fills and which way the cut faces cannot sensibly differ: the plan carries a
+single `pour_axis` rather than a plate normal beside it. And a second plate's
+plane would slice away the plate the first one made, so the editor does not offer
+one and the pass refuses it if a hand-edited plan contains it anyway.
+
+Aiming that axis is a **build** input, not an edit — `cfg.pour_axis`, beside the
+block shape and the parting grid. It decides where the spout and the vents get
+*placed*, and placement happens once; aiming it afterwards would move the cut
+and leave the spout where it was put. What stays editable is the cut's offset
+*along* it, which is the plate's own position and costs nothing to change.
 
 The screws that hold it down alternate between the halves: all four in one half
 holds that half down and leaves the other loose. They are the one thing here

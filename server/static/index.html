@@ -69,6 +69,21 @@
         <label for="grid">Parting grid <span class="val" id="grid-val">400</span></label>
         <input type="range" id="grid" min="120" max="700" step="20" value="400">
       </div>
+      <div class="row" id="row-pour">
+        <label>
+          Pour axis <span class="val" id="pour-val">auto</span>
+        </label>
+        <p class="hint">
+          Which way is up when the mold is filled. The spout goes to the
+          cavity's high point along it, vents to the pockets under it, and a
+          carrier plate cuts square to it. Auto takes the part's longest axis,
+          fat end up.
+        </p>
+        <div class="btn-row">
+          <button id="btn-pour-view">Up in view</button>
+          <button id="btn-pour-auto" class="active">Auto</button>
+        </div>
+      </div>
       <div class="row checks">
         <label><input type="checkbox" id="opt-keys" checked> Propose alignment keys</label>
         <label><input type="checkbox" id="opt-spout" checked> Propose pour spout</label>

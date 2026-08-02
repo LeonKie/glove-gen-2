@@ -405,20 +405,7 @@ select {
 }
 .grp > .grp-note { margin: 0 0 4px; }
 
-/* The note under the cut's aim controls. Indented with them rather than with
-   the group, because it is about those two sliders and not the plate. */
-.ctl-cap.aim {
-  margin: 2px 0 8px;
-  padding-left: 2px;
-  text-transform: none;
-  letter-spacing: 0;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--dim);
-}
 
-/* The pour axis sits above the groups because it belongs to the plan, not to
-   anything in it — and it is reachable whether or not there is a plate. */
-.grp.aim { border-color: var(--accent-2); }
-.grp.aim .grp-head .count { color: var(--accent); }
-.grp.aim .grp-head .ghost { margin-left: auto; }
+/* The pour axis lives in the build panel, so its row needs the hint to sit
+   between the label and the buttons rather than above everything. */
+#row-pour .hint { margin: 0 0 8px; }
