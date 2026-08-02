@@ -381,6 +381,7 @@ def _parts_manifest(out_dir: Path, written: dict) -> dict:
     }
     for extra, label in (
         ("core.stl", "Core, carrier plate and all"),
+        ("dowel_pins.stl", "Dowel pins (or use rod of the same diameter)"),
         ("parting_surface.stl", "Parting surface"),
         ("mold_uncut.stl", "Mold before splitting"),
     ):

@@ -145,6 +145,11 @@ KINDS = ("plate", "key", "spout", "vent", "core_tab", "dowel", "screw", "port")
 # dropped, so an edited plan carried over from a plain mold explains itself.
 CORE_KINDS = ("plate", "core_tab", "dowel", "screw", "port")
 
+# ...and of those, the ones that only mean anything once a plate has cut the
+# mold. A dowel is not one of them: it locks the core to the halves and needs
+# no plate at all, which is the whole difference between it and a screw.
+PLATE_KINDS = ("screw", "port")
+
 # Sizes a caller may set per item, with the range each is clamped to. The
 # bounds are sanity rails, not opinions: they keep a stray unit (metres for
 # millimetres) or a typo'd zero from producing a boolean that runs for minutes
@@ -161,7 +166,11 @@ PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
     "vent": {"radius": (0.2, 20.0)},
     "plate": {"thickness": (2.0, 60.0)},
     "core_tab": {"radius": (0.5, 20.0), "clearance": (0.0, 3.0)},
-    "dowel": {"radius": (1.0, 20.0), "depth": (2.0, 60.0), "clearance": (0.0, 2.0)},
+    "dowel": {
+        "radius": (1.0, 20.0),
+        "engagement": (1.0, 60.0),
+        "clearance": (0.0, 2.0),
+    },
     "screw": {"radius": (0.5, 10.0), "depth": (2.0, 60.0), "clearance": (0.0, 3.0)},
     "port": {"inner_radius": (0.5, 30.0), "outer_radius": (1.0, 60.0)},
 }
@@ -192,11 +201,11 @@ def _defaults_for(kind: str, cfg: MoldConfig | None = None) -> dict[str, float]:
     if kind == "core_tab":
         return {"radius": cfg.core_tabs.radius, "clearance": cfg.core_tabs.clearance}
     if kind == "dowel":
-        c = cfg.carrier
+        d = cfg.core_dowels
         return {
-            "radius": c.dowel_radius,
-            "depth": c.dowel_depth,
-            "clearance": c.dowel_clearance,
+            "radius": d.radius,
+            "engagement": d.engagement,
+            "clearance": d.clearance,
         }
     if kind == "screw":
         c = cfg.carrier
@@ -845,6 +854,10 @@ class Bodies:
     half_a: trimesh.Trimesh
     half_b: trimesh.Trimesh
     core: trimesh.Trimesh | None = None
+    # The dowel pins, fused into one mesh. Deliberately outside the iteration
+    # below: they are not a body of the mold but loose hardware, and a length
+    # of the right rod does the job just as well as a printed one.
+    pins: trimesh.Trimesh | None = None
 
     def __iter__(self):
         """So ``half_a, half_b, core = bodies`` reads the obvious way."""
@@ -956,20 +969,33 @@ def plan_features(
     if state is not None:
         from . import core as core_mod
 
+        # Tabs and dowels want the same spots -- both run from the core out to
+        # solid mold on the seam -- so whichever is planned first is kept clear
+        # of by the other.
+        seam: list = []
         if cfg.core_tabs.enabled:
-            for n, point in enumerate(core_mod.find_tab_sites(ctx, state, cfg), start=1):
-                add("core_tab", point, "pinched on the parting seam", n)
-        if state.has_plate:
-            dowels = core_mod.find_dowel_sites(ctx, state, cfg)
-            for n, point in enumerate(dowels, start=1):
-                add("dowel", point, "on the seam, referencing both halves", n)
-            for n, point in enumerate(
-                core_mod.find_screw_sites(ctx, state, cfg, dowels), start=1
+            for n, (anchor, grip) in enumerate(
+                core_mod.find_tab_sites(ctx, state, cfg), start=1
             ):
-                add("screw", point, "clamps the plate down", n)
+                add("core_tab", anchor, "pinched on the parting seam", n)
+                seam.append(grip)
+        if cfg.core_dowels.enabled:
+            for n, (anchor, grip) in enumerate(
+                core_mod.find_dowel_sites(ctx, state, cfg, avoid=seam), start=1
+            ):
+                add("dowel", anchor, "a pin locks the core to both halves", n)
+                seam.append(grip)
+        if state.has_plate:
             port = core_mod.find_port_site(ctx, state)
             if port is not None:
                 add("port", port, "over the ring of cast at the cut face")
+            for n, point in enumerate(
+                core_mod.find_screw_sites(
+                    ctx, state, cfg, [port] if port is not None else []
+                ),
+                start=1,
+            ):
+                add("screw", point, "clamps the plate down", n)
 
     plan = FeaturePlan(items=items, pour_axis=[float(v) for v in pour_axis])
     log.info(
@@ -1079,6 +1105,11 @@ def apply_plan(
                     "this mold has no core, so there is nothing for a "
                     f"{item.kind.replace('_', ' ')} to attach to"
                 )
+            if item.kind in PLATE_KINDS and not state.has_plate:
+                raise FeatureSkipped(
+                    f"a {item.kind} needs the carrier plate, which is not in "
+                    "this plan"
+                )
             if item.kind == "key":
                 bodies.half_a, bodies.half_b, detail = _apply_key(
                     bodies.half_a, bodies.half_b, ctx, item
@@ -1116,7 +1147,8 @@ def apply_plan(
     if state is not None:
         report_progress(0.95, "fusing the core assembly")
         bodies.core = state.assembly()
-        out.core = _core_summary(state, ctx, cfg, details)
+        bodies.pins = state.pin_stock()
+        out.core = _core_summary(state, ctx, cfg, details, bodies.core)
 
     _aggregate(out, plan, details)
     log.info(
@@ -1127,20 +1159,24 @@ def apply_plan(
     return bodies, out
 
 
-def _core_summary(state, ctx, cfg: MoldConfig, details: dict) -> dict:
+def _core_summary(state, ctx, cfg: MoldConfig, details: dict, assembly) -> dict:
     """The measured half of a core run: the wall, and what the tabs cost."""
     from . import core as core_mod
 
     cut = None if state.plane is None else state.plane - cfg.core.wall
     return {
         "wall": core_mod.measure_wall(
-            state.body,
+            state.wall_body if state.wall_body is not None else state.body,
             ctx.cavity,
             cfg.core.wall,
             pour_axis=state.axis,
             cut=cut,
         ),
         "plate": details["plate"][0] if details["plate"] else None,
+        # A core in two pieces is not a core. It happens when a bore crosses
+        # the root of a tab, so it is worth saying out loud rather than leaving
+        # to be discovered in a slicer.
+        "pieces": core_mod.real_pieces(assembly),
         "tab_through_wall_mm3": core_mod.tab_protrusion(
             state.tabs, ctx.cavity, state.body
         ),

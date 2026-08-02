@@ -19,7 +19,7 @@ const el = {
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
   optCore: $('opt-core'), coreOptions: $('core-options'),
   coreWall: $('core-wall'), coreWallVal: $('core-wall-val'),
-  optCarrier: $('opt-carrier'), optTabs: $('opt-tabs'),
+  optCarrier: $('opt-carrier'), optTabs: $('opt-tabs'), optDowels: $('opt-dowels'),
   coreTabs: $('core-tabs'), coreTabsVal: $('core-tabs-val'), rowCoreTabs: $('row-core-tabs'),
   build: $('btn-build'), buildStatus: $('build-status'), buildProgress: $('build-progress'),
   panelFeatures: $('panel-features'), featureList: $('feature-list'),
@@ -450,8 +450,8 @@ const PARAM_UI = {
     { name: 'clearance', label: 'fit', unit: 'mm', min: 0, max: 3, step: 0.05 },
   ],
   dowel: [
-    { name: 'radius', label: 'radius', unit: 'mm', min: 1, max: 20, step: 0.1 },
-    { name: 'depth', label: 'depth', unit: 'mm', min: 2, max: 60, step: 0.5 },
+    { name: 'radius', label: 'pin r', unit: 'mm', min: 1, max: 20, step: 0.1 },
+    { name: 'engagement', label: 'grip', unit: 'mm', min: 1, max: 60, step: 0.5 },
     { name: 'clearance', label: 'fit', unit: 'mm', min: 0, max: 2, step: 0.05 },
   ],
   screw: [
@@ -516,9 +516,10 @@ function defaultParams(kind) {
   if (kind === 'plate') return { thickness: c.plate_thickness ?? 10 };
   if (kind === 'core_tab') return { radius: t.radius ?? 3, clearance: t.clearance ?? 0.2 };
   if (kind === 'dowel') {
+    const w = d.core_dowels || {};
     return {
-      radius: c.dowel_radius ?? 3, depth: c.dowel_depth ?? 12,
-      clearance: c.dowel_clearance ?? 0.15,
+      radius: w.radius ?? 3, engagement: w.engagement ?? 8,
+      clearance: w.clearance ?? 0.2,
     };
   }
   if (kind === 'screw') {
@@ -712,7 +713,7 @@ function cutPlane() {
 // Everything that hangs off the plate lives on the plate's plane. The cut
 // decides how far along the pour axis they sit; a click only ever chooses
 // where *across* it they go.
-const ON_PLANE = new Set(['dowel', 'screw', 'port']);
+const ON_PLANE = new Set(['screw', 'port']);
 
 /** Slide the items that belong on the cut onto it.
  *
@@ -789,12 +790,13 @@ const GROUP_NOTE = {
     + 'glove’s rim is the cut. Select the row to move it.',
   core_tab: 'A post from the core out past the cast into mold that is solid on '
     + 'both sides of the parting face, where closing the halves pinch it. Click '
-    + 'where it should be gripped; it reaches back to the nearest core, and '
-    + 'crosses the glove wall on the way.',
-  dowel: 'A pin down from the plate into a half-round bore shared by both '
-    + 'halves, so the plate references them equally instead of one of them. '
-    + 'Sits on the seam, at the plate’s face — a click only chooses where '
-    + 'along the seam.',
+    + 'where it should be gripped; it reaches back to the nearest core. No extra '
+    + 'part, but it stays on the core, so the glove has to stretch off it.',
+  dowel: 'A tab turned inside out: the same line through the core, half A and '
+    + 'half B, but bored away rather than added, so a loose rod dropped in from '
+    + 'outside the block locks all three together. Pull the pin before opening '
+    + 'the mold — the core then leaves the glove cleanly, which is the whole '
+    + 'advantage over a tab. Printed as dowel_pins.stl.',
   screw: 'Clamps the plate down, because a core floats rather than sinks. Each '
     + 'has to land wholly inside one half: on the seam it would jack the halves '
     + 'apart instead of holding them shut.',
@@ -810,12 +812,12 @@ const GROUP_NOTE = {
  */
 function groupWarning(kind) {
   if (kind !== 'plate') return '';
-  const plates = itemsOfKind('plate').filter((i) => i.enabled);
-  if (!plates.length || itemsOfKind('dowel').some((i) => i.enabled)) return '';
-  return `<p class="grp-warn">Nothing locates this plate. A dowel needs the ring
-    of mold between the cavity’s widest section and the block wall to be about
-    twice its radius plus 3 mm; if none were proposed, widen the wall margin or
-    shrink the dowel, then build again. Or add one below by hand.</p>`;
+  const on = (k) => itemsOfKind(k).some((i) => i.enabled);
+  if (!on('plate') || on('dowel') || on('core_tab')) return '';
+  return `<p class="grp-warn">The plate closes the mold, but nothing holds the
+    core still inside it — so the wall ends up whatever thickness the core
+    drifts to. Add seam dowels or tabs below, or tick “Propose” for them above
+    and build again.</p>`;
 }
 
 function groupHtml(kind) {
@@ -1024,7 +1026,7 @@ const PLACE_HINT = {
   vent: 'Click the scan where air would be trapped · Esc to cancel',
   plate: 'Click the scan where the mold should be cut — everything past it goes · Esc to cancel',
   core_tab: 'Click the parting surface where a tab should be pinched · Esc to cancel',
-  dowel: 'Click the parting surface where a dowel should sit · Esc to cancel',
+  dowel: 'Click the parting surface where the pin should cross it · Esc to cancel',
   screw: 'Click the plate, clear of the seam · Esc to cancel',
   port: 'Click the plate over the ring of cast · Esc to cancel',
 };
@@ -1034,7 +1036,7 @@ const MOVE_HINT = {
   vent: 'Click the scan to move this vent · Esc to cancel',
   plate: 'Click the scan to move the cut · Esc to cancel',
   core_tab: 'Click the parting surface to move this tab · Esc to cancel',
-  dowel: 'Click the parting surface to move this dowel · Esc to cancel',
+  dowel: 'Click the parting surface to move this pin · Esc to cancel',
   screw: 'Click the plate to move this screw · Esc to cancel',
   port: 'Click the plate to move the port · Esc to cancel',
 };
@@ -1189,8 +1191,8 @@ function drawMarkers() {
       geom = new THREE.CylinderGeometry(reach, reach, Math.max(p.thickness, 1), 40);
       axis = pour;
       offset = Math.max(p.thickness, 1) / 2;
-    } else if (item.kind === 'dowel' || item.kind === 'screw') {
-      // Pins hang *down* from the plate into the mold, so the marker does too.
+    } else if (item.kind === 'screw') {
+      // Screws go *down* from the plate into the mold, so the marker does too.
       geom = new THREE.CylinderGeometry(p.radius, p.radius, Math.max(p.depth, 1), 18);
       axis = pour;
       offset = -Math.max(p.depth, 1) / 2;
@@ -1203,6 +1205,17 @@ function drawMarkers() {
       if (grip) {
         markers.add(rodMarker(item, st, new THREE.Vector3(...grip),
           new THREE.Vector3(...item.position), Math.max(p.radius, 1)));
+        continue;
+      }
+      geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 16, 12);
+    } else if (item.kind === 'dowel') {
+      // The pin runs from inside the core out to daylight. Both ends come back
+      // from the cut, so before one has happened all that can honestly be shown
+      // is where it crosses the seam.
+      const d = st.detail;
+      if (d?.core_world && d?.exit_world) {
+        markers.add(rodMarker(item, st, new THREE.Vector3(...d.core_world),
+          new THREE.Vector3(...d.exit_world), Math.max(p.radius, 1)));
         continue;
       }
       geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 16, 12);
@@ -1333,6 +1346,7 @@ function moldConfig() {
     vents: { enabled: el.optVents.checked },
     core: { enabled: el.optCore.checked, wall: Number(el.coreWall.value) },
     carrier: { enabled: el.optCarrier.checked },
+    core_dowels: { enabled: el.optDowels.checked },
     core_tabs: { enabled: el.optTabs.checked, count: Number(el.coreTabs.value) },
   };
 }
@@ -1515,17 +1529,21 @@ function coreRows(core) {
       core.release.releases ? 'ok' : 'bad']);
   }
   if (core.plate) {
-    const dowels = (core.dowels || []).length;
     const screws = (core.screws || []).length;
     rows.push(
       ['cut at', `${core.plate.plane_offset_mm.toFixed(0)} mm along the pour axis`],
       ['discarded by the cut', `${core.plate.discarded_cm3.toFixed(0)} cm³`],
-      ['plate', dowels
-        ? `${core.plate.thickness_mm.toFixed(1)} mm · ${dowels} dowel` +
-          `${dowels === 1 ? '' : 's'} · ${screws} screws`
-        : `${core.plate.thickness_mm.toFixed(1)} mm · not registered`,
-        dowels ? '' : 'warn'],
+      ['plate', `${core.plate.thickness_mm.toFixed(1)} mm · ${screws} screws`],
     );
+  }
+  if (core.pieces > 1) {
+    // A bore across the root of a tab does not weaken it, it cuts it off.
+    rows.push(['core is in pieces', `${core.pieces} — a bore has severed something`, 'bad']);
+  }
+  const dowels = (core.dowels || []).length;
+  if (dowels) {
+    const pin = core.dowels[0].pin_diameter_mm;
+    rows.push(['seam dowels', `${dowels} · ⌀${pin.toFixed(1)} mm pins`]);
   }
   const tabs = (core.core_tabs || []).length;
   if (tabs) {

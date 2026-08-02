@@ -23,6 +23,8 @@ def _core_config(**over) -> MoldConfig:
     cfg.core.faces = 6_000
     cfg.core_tabs.count = 3
     cfg.core_tabs.min_spacing = 10.0
+    cfg.core_dowels.count = 2
+    cfg.core_dowels.min_spacing = 10.0
     for key, value in over.items():
         section, _, name = key.partition("__")
         setattr(getattr(cfg, section), name, value)
@@ -36,15 +38,19 @@ def core_config() -> MoldConfig:
 
 @pytest.fixture
 def full_config() -> MoldConfig:
-    """Core, plate and tabs: everything switched on."""
-    return _core_config(carrier__enabled=True, core_tabs__enabled=True)
+    """Core, plate, dowels and tabs: everything switched on."""
+    return _core_config(
+        carrier__enabled=True, core_tabs__enabled=True, core_dowels__enabled=True
+    )
 
 
 @pytest.fixture(scope="module")
 def built(request):
     """One full core run shared by the assertions that only read it."""
     taper = request.getfixturevalue("taper")
-    cfg = _core_config(carrier__enabled=True, core_tabs__enabled=True)
+    cfg = _core_config(
+        carrier__enabled=True, core_tabs__enabled=True, core_dowels__enabled=True
+    )
     return pipeline.run(taper, cfg, direction=[1, 0, 0], verify=True)
 
 
@@ -157,20 +163,26 @@ class TestThePlaneCut:
         assert "already cut" in entries[1]["reason"]
 
     def test_the_things_that_stand_on_the_plate_go_with_it(self, taper, full_config):
-        """A dowel with no plate is not a dowel, and says so rather than crashing."""
+        """Screws and the port need the plate; a dowel does not, and stays."""
         built = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)
         plan = built.feature_plan.as_dict()
         for item in plan["items"]:
             if item["kind"] == "plate":
                 item["enabled"] = False
         out = pipeline.run(taper, full_config, direction=[1, 0, 0], plan=plan, verify=False)
-        standing = [
-            i for i in out.feature_report.items if i["kind"] in ("dowel", "screw", "port")
-        ]
+        standing = [i for i in out.feature_report.items if i["kind"] in ("screw", "port")]
         assert standing, "the plan should still carry them"
         for entry in standing:
             assert entry["status"] == "skipped"
             assert "carrier plate" in entry["reason"]
+        # A dowel does not stand on the plate, so it is never skipped for the
+        # want of one. It may still be skipped on its own merits: without the
+        # cut the core is longer, and a run can end up gripping a thinner part
+        # of it than it did when the plan was made.
+        dowels = [i for i in out.feature_report.items if i["kind"] == "dowel"]
+        assert dowels
+        assert any(e["status"] == "applied" for e in dowels)
+        assert not any("carrier plate" in e.get("reason", "") for e in dowels)
 
 
 class TestThePourPath:
@@ -193,13 +205,67 @@ class TestThePourPath:
         assert entry["detail"]["length_mm"] > 0
 
 
-class TestRegistration:
-    def test_dowels_sit_on_the_seam(self, built):
-        dowels = built.report()["core"].get("dowels") or []
+class TestDowels:
+    """A tab turned inside out: bored through all three bodies, with a loose pin."""
+
+    def test_the_bore_goes_through_both_halves_and_the_core(self, taper, full_config):
+        plain = _core_config()  # a core with nothing holding it
+        alone = pipeline.run(taper, plain, direction=[1, 0, 0], verify=False)
+
+        cfg = _core_config(core_dowels__enabled=True)
+        bored = pipeline.run(taper, cfg, direction=[1, 0, 0], verify=False)
+        assert bored.report()["core"]["dowels"]
+
+        # Every body loses material; none of them gains any.
+        assert bored.half_a.volume < alone.half_a.volume
+        assert bored.half_b.volume < alone.half_b.volume
+        assert bored.core.volume < alone.core.volume
+
+    def test_the_pin_is_a_part_you_can_print(self, taper, full_config):
+        built = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)
+        assert built.pins is not None
+        assert built.pins.volume > 0
+
+    def test_the_pin_can_be_pulled(self, built):
+        """A bore that stops inside the block traps its own pin."""
+        for d in built.report()["core"]["dowels"]:
+            assert d["length_mm"] > d["engagement_mm"]
+            exit_at = np.asarray(d["exit_world"])
+            # Daylight: the far end is on the block's surface, not buried in it.
+            assert float(built.mold_result.block.nearest.on_surface([exit_at])[1][0]) < 0.5
+
+    def test_it_sits_on_the_seam(self, built):
+        dowels = built.report()["core"]["dowels"]
         assert dowels
         for d in dowels:
             assert d["seam_drift_mm"] <= 0.4
-            assert d["depth_mm"] >= 2.0
+
+    def test_dowels_need_no_plate(self, taper, core_config):
+        """The whole difference from a screw: a dowel locks the core, not the plate."""
+        core_config.core_dowels.enabled = True
+        built = pipeline.run(taper, core_config, direction=[1, 0, 0], verify=False)
+        applied = [
+            i
+            for i in built.feature_report.items
+            if i["kind"] == "dowel" and i["status"] == "applied"
+        ]
+        assert applied
+        assert not any(i.kind == "plate" for i in built.feature_plan.items)
+
+    def test_a_screw_without_a_plate_is_skipped(self, taper, core_config):
+        core_config.core_dowels.enabled = True
+        built = pipeline.run(taper, core_config, direction=[1, 0, 0], verify=False)
+        plan = built.feature_plan.as_dict()
+        plan["items"].append(
+            {"id": "screw-x", "kind": "screw", "position": [0, 0, 0], "params": {}}
+        )
+        out = pipeline.run(taper, core_config, direction=[1, 0, 0], plan=plan, verify=False)
+        entry = next(i for i in out.feature_report.items if i["kind"] == "screw")
+        assert entry["status"] == "skipped"
+        assert "carrier plate" in entry["reason"]
+
+
+class TestRegistration:
 
     def test_screws_hold_down_both_halves(self, built):
         """All of them in one half clamps that half and leaves the other loose."""
@@ -357,12 +423,14 @@ class TestConfig:
         cfg = MoldConfig.from_dict(
             {
                 "core": {"enabled": True, "wall": 1.8},
-                "carrier": {"enabled": True, "dowel_count": 3},
+                "carrier": {"enabled": True, "plate_thickness": 14.0},
+                "core_dowels": {"enabled": True, "count": 3},
                 "core_tabs": {"enabled": True, "count": 6},
             }
         )
         assert cfg.core.enabled and cfg.core.wall == 1.8
-        assert cfg.carrier.dowel_count == 3
+        assert cfg.carrier.plate_thickness == 14.0
+        assert cfg.core_dowels.count == 3
         assert cfg.core_tabs.count == 6
         assert cfg.keys.radius == 5.0  # untouched sections keep their defaults
 

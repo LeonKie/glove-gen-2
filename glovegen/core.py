@@ -23,46 +23,58 @@ of the block's own cross-section laid across all of them: it caps the halves,
 spans the annulus so the cast is sealed in, and swallows the core's stub so the
 two become one printed body. The glove's rim is exactly the cut.
 
-The plate then registers to the *assembled* block, dowels straddling the
-parting seam so it references both halves equally rather than inheriting one
-half's key clearance, and screws hold it down because the load is uplift.
+Screws hold the plate down, because the load is uplift.
 
 Sealing the annulus means the pour has to come through the plate, which is what
 the port is: a funnel down to the ring of cast at the cut face. With a plate in
 the plan the ordinary spout is redundant, and is reported as such rather than
 cut into material the plane is about to discard.
 
-Seam tabs
----------
-The plate owns gross position but the core still hangs off it as a cantilever,
-and tip deflection goes as length cubed. A tab is a post reaching from the core
-out past the cast silhouette into mold that is solid on both sides of the
-parting face, where closing the halves pinches it. It is the one support whose
-witness mark is free: a tab crosses the glove wall exactly on the seam line,
-which is already a flash ridge that gets trimmed.
+Holding the core still: tabs and dowels
+---------------------------------------
+The plate closes the mold but does not locate the core in it, and the core hangs
+off it as a cantilever whose tip deflection goes as length cubed. Both of the
+things that fix that run the same line -- from inside the core, out past the
+cast silhouette, into mold that is solid on both sides of the parting face --
+and differ only in what is done along it.
+
+A **tab** adds material: a post moulded onto the core, pinched flat when the
+halves close. No extra part, but it is still there when the core is pulled out
+of a cured glove, so the glove has to stretch off it.
+
+A **dowel** takes material away: the same line bored through the core, half A
+and half B alike, so a plain rod dropped in from outside the block locks all
+three together. The pin is pulled before the mold is opened and the core then
+leaves cleanly. Both leave the same hole in the glove; only the tab has to be
+dragged out through it.
+
+The bore is blind in the core -- it stops short of breaking out the far side,
+which on anything slender would not weaken the core but saw it in half -- and
+open to daylight at the other end, because a bore that stops inside the block
+traps its own pin.
 
 The invariant that makes the assembly exist
 -------------------------------------------
 **Every core-side feature is centred on the parting surface**, exactly like an
 alignment key or the pour spout. That is not tidiness; it is what makes an
 assembly sequence possible at all. A tab lying in the parting plane, a dowel
-running along the pour axis but centred on the seam: each leaves a half-round
-groove in either half, widest exactly at its mouth, so the whole core assembly
-lifts straight out of half B along ``+d`` and half A closes back down onto it.
-Put a dowel wholly inside one half instead and it has to be inserted along the
-pour axis, which the tabs -- trapped sideways in their grooves -- make
-impossible. Plate and tabs are only compatible because both obey the rule the
-alignment keys already obey.
+bore along the same plane: each leaves a half-round groove in either half,
+widest exactly at its mouth, so the whole core assembly lifts straight out of
+half B along ``+d`` and half A closes back down onto it. A screw is the
+exception that proves it -- it runs down the pour axis into one half only, and
+it is the one thing here that goes in *after* the mold is shut.
 
-So the sequence is the ordinary moldmaker's one: core assembly into half B,
-half A down on top, screws through the plate.
+So the sequence is the ordinary moldmaker's one: core into half B, pins in,
+half A down on top, screws through the plate. Coming apart is the reverse, and
+the pins have to come out first.
 
 What this does not solve
 ------------------------
-Tabs stick out sideways through the glove wall, so withdrawing the core along
-the cuff axis drags them through the slots they made. On a flexible cast that
-stretches; on a stiff one it tears. The report measures the volume the glove
-has to stretch over rather than assuming it is fine.
+A tab is still attached to the core when the core is pulled out of a cured
+glove, so it drags through the slot it made. On a flexible cast that stretches;
+on a stiff one it tears. The report measures the volume the glove has to
+stretch over rather than assuming it is fine -- and a dowel is the way out of
+it, at the price of a loose pin to keep track of.
 """
 
 from __future__ import annotations
@@ -388,6 +400,13 @@ class CoreState:
     plate_point: np.ndarray | None = None  # a world point on the plane
     discard: trimesh.Trimesh | None = None  # everything past it
     tabs: list = field(default_factory=list)  # kept to price the tear-off
+    # The core as it stood before anything was bored into it. Measuring the
+    # wall against the bored body reads the inside of a dowel hole as glove,
+    # which it is not.
+    wall_body: trimesh.Trimesh | None = None
+    # Loose rods, one per dowel. Not part of the assembly and not one of the
+    # three mold bodies: hardware, which you may well buy rather than print.
+    pins: list = field(default_factory=list)
     _mask: np.ndarray | None = field(default=None, repr=False)
     _dist: tuple | None = field(default=None, repr=False)
 
@@ -431,11 +450,15 @@ class CoreState:
             else f"at {self.plane:.0f} mm along the pour axis; everything past it goes"
         )
 
-    def require_plate(self, what: str) -> None:
-        if not self.has_plate:
-            raise FeatureSkipped(
-                f"a {what} needs the carrier plate, which is not in this plan"
-            )
+    def pin_stock(self) -> trimesh.Trimesh | None:
+        """Every dowel pin, in place, as one mesh -- or nothing if there are none."""
+        if not self.pins:
+            return None
+        if len(self.pins) == 1:
+            return self.pins[0]
+        return trimesh.boolean.union(
+            self.pins, engine="manifold", check_volume=False
+        )
 
     def assembly(self) -> trimesh.Trimesh:
         """Fuse everything into the one body that gets printed."""
@@ -506,6 +529,7 @@ def stage_plate(ctx, point, thickness: float, state: CoreState) -> None:
         raise FeatureSkipped("the cut plane leaves no core behind it")
 
     state.body = body
+    state.wall_body = body
     state.plane = offset
     state.plate = plate
     state.plate_point = np.asarray(point, dtype=np.float64).reshape(3)
@@ -549,104 +573,242 @@ def apply_plate(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
 # --------------------------------------------------------------------------
 
 
-def find_dowel_sites(ctx, state: CoreState, cfg: MoldConfig) -> list[np.ndarray]:
-    """Points on the parting seam, on the plate's face, as far apart as it allows.
+def _seam_run(surface, position, ctx, state: CoreState, section):
+    """The line a seam feature runs along: from inside the core out to an anchor.
 
-    Straddling the seam is the whole point. A plate dowelled into one half
-    inherits that half's key clearance on top of its own fit, so the core's
-    position error is two interfaces deep instead of one; a pin shared between
-    the halves references both equally and self-centres.
+    Only the anchor is in the plan. Which way the run goes is a question about
+    where the core is, so it is answered here rather than stored -- which is
+    what makes "move this" mean "grip the mold here" rather than "point that
+    way". Shared by tabs and dowels, which are the same line: one adds material
+    along it, the other takes it away.
+
+    Returns ``(inner_local, outer_local, axis_local, span, anchor_clearance)``.
     """
-    ccfg = cfg.carrier
-    surface, p = ctx.surface, state.axis
-    nx = surface.shape[0]
-    cell = float(surface.xs[1] - surface.xs[0]) if nx > 1 else 1.0
+    outer_local, (i, j) = ctx.on_parting(position)
+    if not state.core_mask(surface).any():
+        raise FeatureSkipped("the parting surface never passes through the core")
 
-    reach = parting_nodes_world(surface) @ p
-    on_plane = np.abs(reach - state.plane) <= max(cell, 1.0)
-    idx = np.argwhere(on_plane.reshape(surface.shape))
-    if len(idx) == 0:
+    dx = float(surface.xs[1] - surface.xs[0]) if surface.shape[0] > 1 else 1.0
+    dy = float(surface.ys[1] - surface.ys[0]) if surface.shape[1] > 1 else 1.0
+    dist, idx = state.core_distance(surface, (dx, dy))
+    length = float(dist[i, j])
+    if length < section.min_length:
+        raise FeatureSkipped(
+            "this anchor is already inside the core; the run has to reach out "
+            "past the cast to mold that is solid on both sides of the seam"
+        )
+    if length > section.max_length:
+        raise FeatureSkipped(
+            f"the nearest core is {length:.0f} mm away "
+            f"(limit {section.max_length:.0f} mm)"
+        )
+    room = float(ctx.free_distance()[i, j])
+    if room < section.radius:
+        raise FeatureSkipped(
+            f"only {room:.1f} mm of mold around this anchor, needs {section.radius:.1f} mm"
+        )
+
+    ii, jj = int(idx[0][i, j]), int(idx[1][i, j])
+    inner_local = np.array([surface.xs[ii], surface.ys[jj], surface.h[ii, jj]])
+    axis_local = outer_local - inner_local
+    span = float(np.linalg.norm(axis_local))
+    if span < 1e-6:
+        raise FeatureSkipped("the run has nowhere to go")
+    return inner_local, outer_local, axis_local / span, span, room
+
+
+def find_seam_sites(ctx, state: CoreState, section, *, avoid=()) -> list[tuple]:
+    """Seam runs, as ``(anchor, grip)`` pairs in world coordinates.
+
+    The placement is the alignment-key logic run in reverse. A key wants a
+    column that *misses* the part; a seam feature wants both -- an outer end in
+    one of those, with mold on either side of the parting face, and an inner end
+    where the parting surface runs inside the core. A distance transform away
+    from the core gives every free node both its nearest core node and the run
+    between them in one pass.
+    """
+    surface = ctx.surface
+    nx, ny = surface.shape
+    dx = float(surface.xs[1] - surface.xs[0]) if nx > 1 else 1.0
+    dy = float(surface.ys[1] - surface.ys[0]) if ny > 1 else 1.0
+
+    if not state.core_mask(surface).any():
+        log.warning("the parting surface never passes through the core")
+        return []
+    dist, idx = state.core_distance(surface, (dx, dy))
+
+    need = section.radius + section.anchor_margin
+    free_dist = ctx.free_distance()
+    ok = (
+        ~surface.constrained
+        & (free_dist >= need)
+        & (dist >= section.min_length)
+        & (dist <= section.max_length)
+    )
+    if state.plane is not None:
+        # Past the cut there is nothing left to grip.
+        ok &= nodes_below(surface, state.axis, state.plane - section.radius)
+    border_x, border_y = int(np.ceil(need / dx)), int(np.ceil(need / dy))
+    edge = np.zeros_like(ok)
+    edge[border_x : nx - border_x, border_y : ny - border_y] = True
+    ok &= edge
+
+    cand = np.argwhere(ok)
+    if len(cand) == 0:
+        log.warning("no room on the parting face for a seam feature")
         return []
 
-    inside = _inside_footprint(state.plate, p, ccfg.dowel_radius + 1.5)
-    scored: list[tuple[float, np.ndarray]] = []
-    for i, j in idx:
-        start = _node_world(surface, int(i), int(j))
-        if not inside(start):
-            continue
-        if seam_drift(surface, start, -p, ccfg.dowel_depth) > ccfg.max_seam_drift:
-            continue
-        room = free_depth(
-            ctx.cavity, start, -p, ccfg.dowel_depth + _MERGE_MM, ccfg.dowel_radius + 1.0
-        )
-        if min(ccfg.dowel_depth, room - _MERGE_MM) < ccfg.dowel_min_depth:
-            continue
-        scored.append((room, start))
+    # Spread by where each one *grips the core*, not by where it is anchored:
+    # two anchored far apart can still grab the same spot on the core, and
+    # bracing a cantilever needs them spread along its length.
+    inner_ij = np.column_stack([idx[0][ok], idx[1][ok]])
+    inner_pts = np.column_stack(
+        [surface.xs[inner_ij[:, 0]], surface.ys[inner_ij[:, 1]]]
+    )
+    room = free_dist[ok]
 
-    if not scored:
-        log.warning(
-            "no seam point on the plate clears the cavity by %.1f mm",
-            ccfg.dowel_min_depth,
+    # Keep clear of runs already placed, compared *grip to grip*. That is where
+    # they crowd: two runs can be anchored far apart and still take hold of the
+    # same few millimetres of core, and a dowel bored through the root of a tab
+    # does not weaken it, it cuts it off.
+    taken = [surface.frame.to_local(np.asarray(q).reshape(3))[:2] for q in avoid]
+    if taken:
+        gap = np.min(
+            np.linalg.norm(inner_pts[:, None, :] - np.array(taken)[None, :, :], axis=2),
+            axis=1,
         )
-        return []
+        room = np.where(gap >= section.min_spacing, room, -np.inf)
+        if not np.isfinite(room).any():
+            return []
 
-    # Farthest-point along the seam: two dowels close together are one dowel
-    # and a wobble.
-    picked = [max(scored, key=lambda s: s[0])[1]]
-    for _ in range(1, ccfg.dowel_count):
-        gaps = [min(float(np.linalg.norm(s[1] - q)) for q in picked) for s in scored]
-        best = int(np.argmax(gaps))
-        if gaps[best] < ccfg.dowel_min_spacing:
+    chosen = [int(np.argmax(room))]
+    while len(chosen) < section.count:
+        gap = np.min(
+            np.linalg.norm(inner_pts[:, None, :] - inner_pts[chosen][None, :, :], axis=2),
+            axis=1,
+        )
+        score = np.where(gap >= section.min_spacing, room + 0.25 * gap, -np.inf)
+        nxt = int(np.argmax(score))
+        if not np.isfinite(score[nxt]):
             break
-        picked.append(scored[best][1])
-    return picked
+        chosen.append(nxt)
+
+    return [
+        (
+            _node_world(surface, int(cand[c][0]), int(cand[c][1])),
+            _node_world(surface, int(inner_ij[c][0]), int(inner_ij[c][1])),
+        )
+        for c in chosen
+    ]
 
 
 def apply_dowel(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
-    """A pin down from the plate into a half-round bore shared by both halves."""
-    state.require_plate("dowel")
-    p = state.axis
-    frame = Frame.from_direction(p)
+    """Bore one hole through half A, half B *and* the core, and make its pin.
+
+    This is a tab turned inside out. A tab is a post moulded onto the core and
+    pinched by the closing halves; a dowel is the same line through the same
+    three bodies, cut away instead of added, so that a plain rod dropped down it
+    from outside the block registers the core against both halves at once.
+
+    Which is what the extra part buys. Nothing is left attached to the core, so
+    the pin is pulled first and the core then leaves the cured glove cleanly,
+    rather than dragging a tab through the slot it made. The glove ends up with
+    the hole either way.
+
+    The bore is centred on the parting surface for the usual reason: each half
+    gets a groove widest exactly at its mouth, so the halves still open and the
+    core still lifts out -- once the pin is out of the way, which it has to be.
+    """
+    dcfg = cfg.core_dowels
+    surface = ctx.surface
     r = float(item.params["radius"])
+    engagement = float(item.params["engagement"])
     clearance = float(item.params["clearance"])
 
-    start = _on_plane(item.position, p, state.plane)
-    drift = seam_drift(ctx.surface, start, -p, float(item.params["depth"]))
-    if drift > cfg.carrier.max_seam_drift:
+    inner_local, outer_local, axis_local, _span, room = _seam_run(
+        surface, item.position, ctx, state, dcfg
+    )
+    axis_world = surface.frame.to_world(axis_local)
+    inner_world = surface.frame.to_world(inner_local)
+
+    # A blind hole, not a through one. The run enters the core at its outer
+    # surface and keeps going; left unchecked it comes out the far side, and on
+    # anything slender -- a finger, the web between two -- that does not weaken
+    # the core, it saws it in half.
+    depth_available = _exit_distance(state.body, inner_world, -axis_world)
+    if depth_available is None:
+        raise FeatureSkipped("the run does not enter the core at all")
+    engagement = min(engagement, depth_available - max(r, 1.0))
+    if engagement < max(r, 1.0):
         raise FeatureSkipped(
-            f"the parting surface bends {drift:.2f} mm over the dowel's run; "
-            "its groove would be an undercut, not a socket"
+            f"only {max(depth_available, 0.0):.1f} mm of core along this run; a "
+            "bore that deep would break out the other side"
         )
-    room = free_depth(ctx.cavity, start, -p, float(item.params["depth"]) + _MERGE_MM, r + 1.0)
-    depth = min(float(item.params["depth"]), room - _MERGE_MM)
-    if depth < 2.0 * r * 0.5:
+    start_local = inner_local - axis_local * engagement
+    start_world = surface.frame.to_world(start_local)
+
+    # Run it out to daylight. A bore that stops inside the block traps its own
+    # pin, and a pin that cannot be pulled is a tab with extra steps.
+    reach = _exit_distance(ctx.block, start_world, axis_world)
+    if reach is None:
         raise FeatureSkipped(
-            f"only {max(depth, 0.0):.1f} mm of mold under this point before the "
-            "cavity; a pin that shallow does not register anything"
+            "this run never reaches the outside of the block, so the pin could "
+            "not be pulled back out before the mold is opened"
+        )
+    drift = seam_drift(surface, start_world, axis_world, reach)
+    if drift > dcfg.max_seam_drift:
+        raise FeatureSkipped(
+            f"the parting surface bends {drift:.2f} mm over the bore's {reach:.0f} mm "
+            f"run (limit {dcfg.max_seam_drift} mm); its groove would be an undercut"
         )
 
-    up = frame.to_local(p)
-    pin = place_local(
-        frustum(r, r, depth + _MERGE_MM, sections=32),
-        frame,
-        frame.to_local(start - p * depth),
-        up,
-    )
     bore = place_local(
-        frustum(r + clearance, r + clearance, depth + 2.0 * _MERGE_MM, sections=32),
-        frame,
-        frame.to_local(start - p * (depth + _MERGE_MM)),
-        up,
+        frustum(r + clearance, r + clearance, reach + _MERGE_MM, sections=32),
+        surface.frame,
+        start_local - axis_local * clearance,
+        axis_local,
     )
-    state.pieces.append(pin)
+    pin = place_local(
+        frustum(r, r, reach, sections=32), surface.frame, start_local, axis_local
+    )
+
+    if state.wall_body is None:
+        state.wall_body = state.body
     bodies.half_a = cut(bodies.half_a, bore, "dowel -> A")
     bodies.half_b = cut(bodies.half_b, bore, "dowel -> B")
+    state.body = cut(state.body, bore, "dowel -> core")
+    # ...and out of the finished assembly too, so a pin whose line happens to
+    # pass through a tab still has a channel rather than a interference fit.
+    state.holes.append(bore)
+    state.trimmed()
+    state.pins.append(pin)
+
     return {
         "id": item.id,
-        "start_world": [round(float(v), 2) for v in start],
-        "depth_mm": round(depth, 2),
+        "anchor_world": [round(float(v), 2) for v in surface.frame.to_world(outer_local)],
+        "core_world": [round(float(v), 2) for v in surface.frame.to_world(inner_local)],
+        "exit_world": [round(float(v), 2) for v in (start_world + axis_world * reach)],
+        "length_mm": round(reach, 2),
+        "engagement_mm": round(engagement, 2),
+        "pin_diameter_mm": round(2.0 * r, 2),
+        "anchor_clearance_mm": round(room, 2),
         "seam_drift_mm": round(drift, 3),
     }
+
+
+def _exit_distance(block, start, axis) -> float | None:
+    """How far along ``axis`` the block's outer surface is, from ``start``."""
+    if block is None:
+        return None
+    hits = block.ray.intersects_location(
+        np.asarray(start, dtype=np.float64).reshape(1, 3),
+        np.asarray(axis, dtype=np.float64).reshape(1, 3),
+        multiple_hits=True,
+    )[0]
+    if len(hits) == 0:
+        return None
+    reach = float(((hits - np.asarray(start)) @ unit(axis)).max())
+    return reach if reach > 1.0 else None
 
 
 def _on_plane(position, pour_axis, plane: float) -> np.ndarray:
@@ -656,7 +818,7 @@ def _on_plane(position, pour_axis, plane: float) -> np.ndarray:
     return q + p * (plane - float(q @ p))
 
 
-def find_screw_sites(ctx, state: CoreState, cfg: MoldConfig, avoid) -> list[np.ndarray]:
+def find_screw_sites(ctx, state: CoreState, cfg: MoldConfig, avoid=()) -> list[np.ndarray]:
     """Clamping screws around the plate's edge, alternating between the halves.
 
     Unlike everything else here a screw goes in last, after the mold is closed,
@@ -683,7 +845,7 @@ def find_screw_sites(ctx, state: CoreState, cfg: MoldConfig, avoid) -> list[np.n
     candidates: dict[str, list[np.ndarray]] = {"a": [], "b": []}
     for u, v in probes:
         start = frame.to_world(np.array([u, v, state.plane]))
-        if any(np.linalg.norm(start - q) < clear + ccfg.dowel_radius + 4.0 for q in avoid):
+        if any(np.linalg.norm(start - q) < clear + ccfg.port_outer_radius + 4.0 for q in avoid):
             continue
         side = _screw_side(ctx.surface, start, p, ccfg.screw_depth, clear)
         if side is None:
@@ -746,7 +908,6 @@ def _screw_side(surface, start, p, depth: float, clear: float) -> str | None:
 
 def apply_screw(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
     """A pilot bore into one half and a clearance hole through the plate."""
-    state.require_plate("screw")
     p = state.axis
     frame = Frame.from_direction(p)
     up = frame.to_local(p)
@@ -832,7 +993,6 @@ def find_port_site(ctx, state: CoreState) -> np.ndarray | None:
 
 def apply_port(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
     """Cut the funnel through the plate."""
-    state.require_plate("pour port")
     p = state.axis
     frame = Frame.from_direction(p)
     inner = float(item.params["inner_radius"])
@@ -865,120 +1025,35 @@ def apply_port(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
 # --------------------------------------------------------------------------
 
 
-def find_tab_sites(ctx, state: CoreState, cfg: MoldConfig) -> list[np.ndarray]:
-    """Anchor points for tabs: solid mold on the seam, near enough to the core.
+def find_tab_sites(ctx, state: CoreState, cfg: MoldConfig, *, avoid=()) -> list[tuple]:
+    return find_seam_sites(ctx, state, cfg.core_tabs, avoid=avoid)
 
-    The placement is the alignment-key logic run in reverse. A key wants a
-    column that *misses* the part; a tab wants both -- an outer end in one of
-    those, with mold on either side of the parting face, and an inner end where
-    the parting surface runs inside the core. A distance transform away from the
-    core gives every free node both its nearest core node and the length of the
-    run between them in one pass.
-    """
-    tcfg = cfg.core_tabs
-    surface = ctx.surface
-    nx, ny = surface.shape
-    dx = float(surface.xs[1] - surface.xs[0]) if nx > 1 else 1.0
-    dy = float(surface.ys[1] - surface.ys[0]) if ny > 1 else 1.0
 
-    in_core = state.core_mask(surface)
-    if not in_core.any():
-        log.warning("the parting surface never passes through the core; no tabs")
-        return []
-    dist, idx = state.core_distance(surface, (dx, dy))
-
-    need = tcfg.radius + tcfg.anchor_margin
-    free_dist = ctx.free_distance()
-    ok = (
-        ~surface.constrained
-        & (free_dist >= need)
-        & (dist >= tcfg.min_length)
-        & (dist <= tcfg.max_length)
-    )
-    if state.plane is not None:
-        # A tab past the cut plane would union a stub onto nothing.
-        ok &= nodes_below(surface, state.axis, state.plane - tcfg.radius)
-    border_x, border_y = int(np.ceil(need / dx)), int(np.ceil(need / dy))
-    edge = np.zeros_like(ok)
-    edge[border_x : nx - border_x, border_y : ny - border_y] = True
-    ok &= edge
-
-    cand = np.argwhere(ok)
-    if len(cand) == 0:
-        log.warning("no room on the parting face for core tabs")
-        return []
-
-    # Spread by where each tab *grips the core*, not by where it is anchored:
-    # two tabs anchored far apart can still grab the same spot on the core, and
-    # bracing a cantilever needs them spread along its length.
-    inner_ij = np.column_stack([idx[0][ok], idx[1][ok]])
-    inner_pts = np.column_stack(
-        [surface.xs[inner_ij[:, 0]], surface.ys[inner_ij[:, 1]]]
-    )
-    room = free_dist[ok]
-
-    chosen = [int(np.argmax(room))]
-    while len(chosen) < tcfg.count:
-        gap = np.min(
-            np.linalg.norm(inner_pts[:, None, :] - inner_pts[chosen][None, :, :], axis=2),
-            axis=1,
-        )
-        score = np.where(gap >= tcfg.min_spacing, room + 0.25 * gap, -np.inf)
-        nxt = int(np.argmax(score))
-        if not np.isfinite(score[nxt]):
-            break
-        chosen.append(nxt)
-
-    return [_node_world(surface, int(cand[c][0]), int(cand[c][1])) for c in chosen]
+def find_dowel_sites(ctx, state: CoreState, cfg: MoldConfig, *, avoid=()) -> list[tuple]:
+    return find_seam_sites(ctx, state, cfg.core_dowels, avoid=avoid)
 
 
 def apply_tab(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
     """A post from the core out to an anchor, pinched flat on the parting face.
 
-    Only the anchor is stored in the plan. The inner end is found here, as the
-    nearest point where the parting surface is inside the core, so moving a tab
-    is a matter of saying where it should grip the mold and letting it reach
-    back to whatever core is nearest.
+    The male half of what a dowel does: same line through the same three bodies,
+    but material added along it rather than taken away, so no extra part is
+    needed -- at the cost of leaving something attached to the core for the
+    glove to stretch over on its way off.
     """
-    surface = ctx.surface
     tcfg = cfg.core_tabs
+    surface = ctx.surface
     r = float(item.params["radius"])
     clearance = float(item.params["clearance"])
 
-    outer_local, (i, j) = ctx.on_parting(item.position)
-    if not state.core_mask(surface).any():
-        raise FeatureSkipped("the parting surface never passes through the core")
-
-    dx = float(surface.xs[1] - surface.xs[0]) if surface.shape[0] > 1 else 1.0
-    dy = float(surface.ys[1] - surface.ys[0]) if surface.shape[1] > 1 else 1.0
-    dist, idx = state.core_distance(surface, (dx, dy))
-    length = float(dist[i, j])
-    if length < tcfg.min_length:
-        raise FeatureSkipped(
-            "this anchor is already inside the core; a tab needs to reach out "
-            "past the cast to something that can pinch it"
-        )
-    if length > tcfg.max_length:
-        raise FeatureSkipped(
-            f"the nearest core is {length:.0f} mm away (limit {tcfg.max_length:.0f} mm)"
-        )
-    room = float(ctx.free_distance()[i, j])
-    if room < r:
-        raise FeatureSkipped(
-            f"only {room:.1f} mm of mold around this anchor, needs {r:.1f} mm"
-        )
-
-    inner_local = np.array(
-        [surface.xs[idx[0][i, j]], surface.ys[idx[1][i, j]], surface.h[idx[0][i, j], idx[1][i, j]]]
+    inner_local, outer_local, axis_local, span, room = _seam_run(
+        surface, item.position, ctx, state, tcfg
     )
-    axis_local = outer_local - inner_local
-    span = float(np.linalg.norm(axis_local))
-    if span < 1e-6:
-        raise FeatureSkipped("the tab has nowhere to run to")
-    axis_local = axis_local / span
-
     drift = seam_drift(
-        surface, surface.frame.to_world(inner_local), surface.frame.to_world(axis_local), span
+        surface,
+        surface.frame.to_world(inner_local),
+        surface.frame.to_world(axis_local),
+        span,
     )
     if drift > tcfg.max_seam_drift:
         raise FeatureSkipped(

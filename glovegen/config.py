@@ -153,26 +153,6 @@ class CarrierConfig:
     cut_inset: float = 5.0
     plate_thickness: float = 10.0
 
-    dowel_count: int = 2
-    # A dowel lives in the ring of mold between the cavity's widest section and
-    # the block wall, and needs roughly ``2 * radius + 3`` mm of it: clearance
-    # from the cavity on one side, wall to the block face on the other. At the
-    # default 10 mm block margin a 4 mm pin misses by half a millimetre and no
-    # position on the seam qualifies, so the default is a size that fits.
-    dowel_radius: float = 3.0
-    dowel_depth: float = 12.0
-    dowel_clearance: float = 0.15
-    # The plane cuts *through* the part, so at the cut face the cavity wall is
-    # right there and a bore's usable depth is whatever it leaves rather than
-    # whatever was asked for. Half a diameter still registers in plastic; below
-    # that a pin is decoration. A block margin close to the dowel diameter is
-    # what usually forces the compromise -- there is then no position both clear
-    # of the cavity and inside the plate's edge.
-    dowel_min_depth: float = 5.0
-    # Two dowels this much closer together than the seam is long are not two
-    # dowels; they are one dowel and a wobble.
-    dowel_min_spacing: float = 25.0
-
     screw_count: int = 4
     screw_radius: float = 2.0  # pilot bore into the block
     screw_depth: float = 14.0
@@ -188,6 +168,39 @@ class CarrierConfig:
     # How far a bore's axis may drift off the parting surface over its length
     # before its half-round groove stops being widest at its mouth -- past this
     # the groove is an undercut and the core locks into the halves.
+    max_seam_drift: float = 0.4
+
+
+@dataclass
+class CoreDowelConfig:
+    """Loose pins that lock the core to both halves at once.
+
+    A bore centred on the parting surface runs from inside the core, out across
+    the cast and through the block wall. A plain rod dropped down it registers
+    the core against half A and half B together -- the same job a tab does, but
+    with the pin as a separate part rather than moulded onto the core.
+
+    That difference is the point. A tab is left sticking out of the core, so
+    pulling the core out of a cured glove drags it through the slot it made. A
+    pin is withdrawn first, and the core then leaves cleanly; all that is left
+    in the glove is the hole, the same hole a tab would have made anyway.
+
+    Off by default, like everything else on top of the core.
+    """
+
+    enabled: bool = False
+    count: int = 2
+    radius: float = 3.0
+    # How far past the core's surface the bore reaches: the pin's grip on it.
+    engagement: float = 8.0
+    # Gap between the pin and its bore, so the rod actually slides.
+    clearance: float = 0.2
+
+    # Mold required around the bore where it crosses the parting face.
+    anchor_margin: float = 2.0
+    min_length: float = 2.0
+    max_length: float = 60.0
+    min_spacing: float = 20.0
     max_seam_drift: float = 0.4
 
 
@@ -250,6 +263,7 @@ class MoldConfig:
     vents: VentConfig = field(default_factory=VentConfig)
     core: CoreConfig = field(default_factory=CoreConfig)
     carrier: CarrierConfig = field(default_factory=CarrierConfig)
+    core_dowels: CoreDowelConfig = field(default_factory=CoreDowelConfig)
     core_tabs: CoreTabConfig = field(default_factory=CoreTabConfig)
 
     def to_dict(self) -> dict[str, Any]:
@@ -267,6 +281,7 @@ class MoldConfig:
             "vents": VentConfig,
             "core": CoreConfig,
             "carrier": CarrierConfig,
+            "core_dowels": CoreDowelConfig,
             "core_tabs": CoreTabConfig,
         }
         kwargs: dict[str, Any] = {}

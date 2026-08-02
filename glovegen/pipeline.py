@@ -46,6 +46,8 @@ class PipelineResult:
     # all, plus what was measured about it.
     core: trimesh.Trimesh | None = None
     core_report: dict = field(default_factory=dict)
+    # The loose dowel pins, if any were bored for.
+    pins: trimesh.Trimesh | None = None
     # The eroded body before the plan touched it. Cached rather than rebuilt:
     # the erosion is the expensive part of a core run and depends on nothing the
     # plan decides, so an edited plan can be re-cut from it.
@@ -92,6 +94,8 @@ class PipelineResult:
         }
         if self.core is not None:
             written["core"] = str(meshio.export(self.core, out_dir / "core.stl"))
+        if self.pins is not None:
+            written["pins"] = str(meshio.export(self.pins, out_dir / "dowel_pins.stl"))
         if extras:
             written["parting_surface"] = str(
                 meshio.export(
@@ -206,6 +210,7 @@ def run(
         progress=lambda f, msg: report(0.76 + 0.16 * f, msg),
     )
     half_a, half_b, core_mesh = bodies
+    pins = bodies.pins
     timings["features"] = time.time() - t0
     validate.assert_solid_enough(half_a, "half A (with features)")
     validate.assert_solid_enough(half_b, "half B (with features)")
@@ -237,6 +242,7 @@ def run(
         feature_plan=plan,
         core=core_mesh,
         core_report=core_report,
+        pins=pins,
         core_body=core_body,
         timings=timings,
     )
@@ -254,6 +260,7 @@ class FeatureResult:
     separation: dict = field(default_factory=dict)
     core: trimesh.Trimesh | None = None
     core_report: dict = field(default_factory=dict)
+    pins: trimesh.Trimesh | None = None
     timings: dict = field(default_factory=dict)
 
     def report(self) -> dict:
@@ -292,6 +299,8 @@ class FeatureResult:
         }
         if self.core is not None:
             written["core"] = str(meshio.export(self.core, out_dir / "core.stl"))
+        if self.pins is not None:
+            written["pins"] = str(meshio.export(self.pins, out_dir / "dowel_pins.stl"))
         return written
 
 
@@ -324,6 +333,7 @@ def apply_feature_plan(
         half_a, half_b, ctx, plan, cfg=cfg, progress=lambda f, msg: report(0.05 + 0.75 * f, msg)
     )
     half_a, half_b, core_mesh = bodies
+    pins = bodies.pins
     timings["features"] = time.time() - t0
     validate.assert_solid_enough(half_a, "half A (with features)")
     validate.assert_solid_enough(half_b, "half B (with features)")
@@ -354,6 +364,7 @@ def apply_feature_plan(
         separation=separation,
         core=core_mesh,
         core_report=core_report,
+        pins=pins,
         timings=timings,
     )
 

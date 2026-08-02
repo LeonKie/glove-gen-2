@@ -70,11 +70,14 @@ def _config_from_args(args) -> MoldConfig:
     if getattr(args, "tabs", None):
         cfg.core_tabs.enabled = True
         cfg.core_tabs.count = args.tabs
+    if getattr(args, "dowels", None):
+        cfg.core_dowels.enabled = True
+        cfg.core_dowels.count = args.dowels
     for target, attr, option in (
         (cfg.core_tabs, "radius", "tab_radius"),
+        (cfg.core_dowels, "radius", "dowel_radius"),
         (cfg.carrier, "cut_inset", "cut_inset"),
         (cfg.carrier, "plate_thickness", "plate_thickness"),
-        (cfg.carrier, "dowel_count", "dowels"),
         (cfg.carrier, "screw_count", "screws"),
     ):
         value = getattr(args, option, None)
@@ -275,11 +278,17 @@ def main(argv: list[str] | None = None) -> int:
     core.add_argument(
         "--plate-thickness", type=float, default=None, help="carrier plate thickness, mm"
     )
-    core.add_argument("--dowels", type=int, default=None, help="seam dowels under the plate")
     core.add_argument("--screws", type=int, default=None, help="clamping screws through the plate")
     core.add_argument(
+        "--dowels", type=int, default=None,
+        help="bores through both halves and the core for loose registration pins; "
+             "giving this switches them on and writes dowel_pins.stl",
+    )
+    core.add_argument("--dowel-radius", type=float, default=None, help="dowel pin radius, mm")
+    core.add_argument(
         "--tabs", type=int, default=None,
-        help="number of tabs pinched on the parting seam; giving this switches them on",
+        help="tabs moulded onto the core and pinched on the seam — a dowel without "
+             "the loose pin, at the cost of a tab to drag out of the glove",
     )
     core.add_argument("--tab-radius", type=float, default=None, help="seam tab radius, mm")
     p_mo.add_argument(
