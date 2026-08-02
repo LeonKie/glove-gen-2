@@ -36,6 +36,12 @@
         One half pulls along <b>+d</b>, the other along <b>−d</b>. Red marks
         geometry neither half can reach — where a flexible cast has to flex out.
       </p>
+      <p class="hint">
+        The view stands the part up along <b>+d</b>, so what you see is how the
+        halves come off it. Orbiting sideways spins around the pull axis and
+        leaves it upright; <b>From view up</b> is the way back — tumble the part
+        to how you want it pulled, then press.
+      </p>
       <div class="row">
         <label for="az">Azimuth <span class="val" id="az-val">0°</span></label>
         <input type="range" id="az" min="-180" max="180" step="1" value="0">
@@ -46,7 +52,7 @@
       </div>
       <div class="btn-row">
         <button id="btn-suggest" class="primary">Suggest best</button>
-        <button id="btn-from-view">From view</button>
+        <button id="btn-from-view">From view up</button>
       </div>
       <div id="suggest-status" class="status" hidden></div>
       <dl id="undercut-stats" class="stats" hidden></dl>
@@ -68,6 +74,21 @@
       <div class="row">
         <label for="grid">Parting grid <span class="val" id="grid-val">400</span></label>
         <input type="range" id="grid" min="120" max="700" step="20" value="400">
+      </div>
+      <div class="row" id="row-pour">
+        <label>
+          Pour axis <span class="val" id="pour-val">auto</span>
+        </label>
+        <p class="hint">
+          Which way is up when the mold is filled. The spout goes to the
+          cavity's high point along it, vents to the pockets under it, and a
+          carrier plate cuts square to it. Auto takes the part's longest axis,
+          fat end up.
+        </p>
+        <div class="btn-row">
+          <button id="btn-pour-view">Up in view</button>
+          <button id="btn-pour-auto" class="active">Auto</button>
+        </div>
       </div>
       <div class="row checks">
         <label><input type="checkbox" id="opt-keys" checked> Propose alignment keys</label>

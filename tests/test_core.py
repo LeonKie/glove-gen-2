@@ -162,6 +162,37 @@ class TestThePlaneCut:
         assert [e["status"] for e in entries] == ["applied", "skipped"]
         assert "already cut" in entries[1]["reason"]
 
+    def test_aiming_the_pour_aims_the_cut(self, taper, full_config):
+        """They are one thing: the port through the plate is the way in.
+
+        A plate square to something other than the way the mold fills would be
+        a plate you pour into at an angle, so the plan carries one axis and the
+        cut follows it.
+        """
+        built = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)
+        plan = built.feature_plan.as_dict()
+        before = built.core_report["plate"]
+
+        tilt = np.radians(20.0)
+        base = unit(plan["pour_axis"])
+        across = unit(np.cross(base, [1.0, 0.0, 0.0]))
+        plan["pour_axis"] = [
+            float(v) for v in unit(base * np.cos(tilt) + across * np.sin(tilt))
+        ]
+        out = pipeline.run(taper, full_config, direction=[1, 0, 0], plan=plan, verify=False)
+
+        # The plate is square to the aimed axis, not the one it was built with.
+        p = unit(out.feature_plan.pour_axis)
+        assert abs(p @ base - np.cos(tilt)) < 1e-6
+        reach = np.asarray(out.core.vertices) @ p
+        assert float(reach.max()) == pytest.approx(
+            out.core_report["plate"]["plane_offset_mm"]
+            + out.core_report["plate"]["thickness_mm"],
+            abs=0.3,
+        )
+        assert out.core_report["plate"]["volume_cm3"] > 0
+        assert out.core_report["plate"]["plane_offset_mm"] != before["plane_offset_mm"]
+
     def test_the_things_that_stand_on_the_plate_go_with_it(self, taper, full_config):
         """Screws and the port need the plate; a dowel does not, and stays."""
         built = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)

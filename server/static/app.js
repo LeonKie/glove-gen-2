@@ -16,6 +16,7 @@ const el = {
   undercutStats: $('undercut-stats'),
   margin: $('margin'), marginVal: $('margin-val'),
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
+  pourVal: $('pour-val'), pourFromView: $('btn-pour-view'), pourAuto: $('btn-pour-auto'),
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
   optCore: $('opt-core'), coreOptions: $('core-options'),
   coreWall: $('core-wall'), coreWallVal: $('core-wall-val'),
@@ -53,6 +54,10 @@ const state = {
   folded: new Set(),    // kinds whose group is collapsed
   uid: 0,               // counter behind hand-placed ids
   pullDirection: [0, 0, 1],
+  // The pour axis to build with, or null for the automatic choice. A build
+  // input rather than an edit: it decides where the spout and the vents are
+  // *placed*, and placement only happens once.
+  pourChoice: null,
   pourSpan: null,       // [min, max] of the scan along the pour axis, for the cut slider
   pourRadius: null,     // and its reach across that axis, for the plate marker
   defaults: null,       // MoldConfig defaults, from /api/status
@@ -89,6 +94,7 @@ scene.add(fill);
 const layers = { part: null, half_a: null, half_b: null, parting: null, core: null };
 const gizmo = new THREE.Group();
 scene.add(gizmo);
+let pourArrow = null;
 // Where the knobs and holes are, drawn over whichever layer is showing.
 const markers = new THREE.Group();
 scene.add(markers);
@@ -297,10 +303,65 @@ function frameModel(sphere) {
   controls.target.copy(sphere.center);
   camera.near = r / 200;
   camera.far = r * 60;
-  camera.position.copy(sphere.center).add(new THREE.Vector3(r * 1.5, -r * 1.7, r * 1.1));
+  // Far enough back that the bounding sphere fits the vertical field of view
+  // with a little air. Standing the part up puts its long axis on the short
+  // screen axis, so an eyeballed distance clips it.
+  const fit = (r / Math.sin((camera.fov * Math.PI) / 360)) * 1.15;
+  camera.position
+    .copy(sphere.center)
+    .add(new THREE.Vector3(1.5, -1.7, 1.1).normalize().multiplyScalar(fit));
   camera.updateProjectionMatrix();
   controls.update();
   buildGizmo(sphere);
+  standUp(currentDirection());
+}
+
+/* ---- standing the part up ----
+ *
+ * The pull direction is the one axis the whole build turns on, and reading it
+ * off an arrow is a translation step every time. So the view carries it
+ * instead: the camera is rolled until the pull points up the screen, and the
+ * part is simply *seen* standing the way the halves will come off it. Nothing
+ * is baked into the mesh -- the rotation stays where it always was, in the
+ * job's frame -- so outputs keep the scan's coordinates and changing the pull
+ * costs a camera move rather than a re-prepare.
+ *
+ * With ``camera.up`` on the pull axis, orbiting sideways spins around it and
+ * leaves it up; orbiting over the top tilts it away, which is what the
+ * pour-axis picker reads.
+ */
+function standUp(d) {
+  const up = new THREE.Vector3(d.x, d.y, d.z);
+  if (up.lengthSq() < 1e-9) return;
+  up.normalize();
+
+  const t = controls.target;
+  const offset = camera.position.clone().sub(t);
+  const dist = Math.max(offset.length(), 1);
+  // Keep standing roughly where we were standing: only the part of the offset
+  // across the new up survives. Looking straight down it leaves nothing, so
+  // then any perpendicular will do.
+  const side = offset.addScaledVector(up, -offset.dot(up));
+  if (side.lengthSq() < 1e-6 * dist * dist) {
+    side.crossVectors(up, new THREE.Vector3(0, 0, 1));
+    if (side.lengthSq() < 1e-9) side.crossVectors(up, new THREE.Vector3(1, 0, 0));
+  }
+
+  camera.up.copy(up);
+  // OrbitControls snapshots the orbit axis from camera.up when it is built,
+  // so moving the axis means refreshing that snapshot too.
+  if (controls._quat) {
+    controls._quat.setFromUnitVectors(up, new THREE.Vector3(0, 1, 0));
+    controls._quatInverse.copy(controls._quat).invert();
+  }
+  camera.position.copy(t).add(side.normalize().multiplyScalar(dist));
+  camera.lookAt(t);
+  controls.update();
+}
+
+/** Which way is up on screen right now, as a world vector. */
+function viewUp() {
+  return new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
 }
 
 /* ------------------------------------------------------------------ *
@@ -329,6 +390,7 @@ function syncDirLabels() {
   el.elVal.textContent = `${el.el.value}°`;
   orientGizmo();
   const d = currentDirection();
+  standUp(d);
   el.hud.textContent = `d = (${d.x.toFixed(3)}, ${d.y.toFixed(3)}, ${d.z.toFixed(3)})`;
 }
 
@@ -350,6 +412,23 @@ function buildGizmo(sphere) {
     if (sign < 0) head.rotation.z = Math.PI;
     gizmo.add(shaft, head);
   }
+  // The pour axis, when it has been aimed by hand: one arrow, no counterpart,
+  // because unlike the pull it is not symmetric -- up is up.
+  pourArrow = new THREE.Group();
+  const stem = new THREE.Mesh(
+    new THREE.CylinderGeometry(r * 0.01, r * 0.01, len * 0.9, 10),
+    new THREE.MeshBasicMaterial({ color: 0x6fd08c }),
+  );
+  stem.position.set(0, len * 0.45, 0);
+  const tip = new THREE.Mesh(
+    new THREE.ConeGeometry(r * 0.04, r * 0.1, 14),
+    new THREE.MeshBasicMaterial({ color: 0x6fd08c }),
+  );
+  tip.position.set(0, len * 0.95, 0);
+  pourArrow.add(stem, tip);
+  pourArrow.visible = false;
+  gizmo.add(pourArrow);
+
   if (sphere) gizmo.position.copy(sphere.center);
   orientGizmo();
 }
@@ -357,6 +436,15 @@ function buildGizmo(sphere) {
 function orientGizmo() {
   // Gizmo is modelled along +Y; rotate that onto the pull direction.
   gizmo.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), currentDirection());
+  if (pourArrow) {
+    pourArrow.visible = Boolean(state.pourChoice);
+    if (state.pourChoice) {
+      pourArrow.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(...state.pourChoice).normalize(),
+      );
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -562,8 +650,9 @@ async function automaticPlan(job) {
 
 /** The range the cut slider spans: the scan along the pour axis, plus the wall
  *  margin either side, because the block reaches that far and the plane may
- *  legitimately sit in it. */
-function measurePourSpan() {
+ *  legitimately sit in it. Re-measured whenever the pour axis is aimed
+ *  somewhere else, since both ends move with it. */
+function measureCutSpan() {
   const geom = layers.part?.geometry;
   if (!geom) { state.pourSpan = null; return; }
   geom.computeBoundingBox();
@@ -600,7 +689,7 @@ function measurePourSpan() {
 function setPlan(plan, { statuses = null } = {}) {
   state.plan = clonePlan(plan);
   state.featureStatus = statuses || {};
-  measurePourSpan();
+  measureCutSpan();
   snapToCut();
   // Hand-placed ids carry a counter. A plan can arrive from a job built in an
   // earlier session, so pull the counter past whatever is already in it rather
@@ -787,7 +876,9 @@ function itemHtml(item, n) {
 const GROUP_NOTE = {
   plate: 'Cuts the mold on a plane and caps what is left. Everything past the '
     + 'plane is thrown away — half A, half B and the core alike — so the '
-    + 'glove’s rim is the cut. Select the row to move it.',
+    + 'glove’s rim is the cut. Select the row to slide it along the pour axis; '
+    + 'which way that axis points is set before the build, because it also '
+    + 'decides where the spout and the vents go.',
   core_tab: 'A post from the core out past the cast into mold that is solid on '
     + 'both sides of the parting face, where closing the halves pinch it. Click '
     + 'where it should be gripped; it reaches back to the nearest core. No extra '
@@ -820,11 +911,17 @@ function groupWarning(kind) {
     and build again.</p>`;
 }
 
+// One mold, one cut. A second plate's plane would slice away the plate the
+// first one made, so the only thing to do with it is refuse it -- and it is
+// better not to offer it at all than to offer it and then explain.
+const SINGLETON = new Set(['plate']);
+
 function groupHtml(kind) {
   const items = itemsOfKind(kind);
   const folded = state.folded.has(kind);
   const on = items.filter((i) => i.enabled).length;
   const adding = state.placing === kind && !state.movingId;
+  const full = SINGLETON.has(kind) && items.length > 0;
   const head = `
     <div class="grp-head">
       <input type="checkbox" data-group-toggle="${esc(kind)}" ${on ? 'checked' : ''}
@@ -832,8 +929,8 @@ function groupHtml(kind) {
       <span class="dot ${esc(kind)}"></span>
       <span class="grp-name">${labelN(kind)}</span>
       <span class="count">${items.length || ''}</span>
-      <button class="ghost add${adding ? ' active' : ''}" data-add="${esc(kind)}"
-              title="place one in the viewport">+ add</button>
+      ${full ? '' : `<button class="ghost add${adding ? ' active' : ''}" data-add="${esc(kind)}"
+              title="place one in the viewport">+ add</button>`}
       ${items.length
         ? `<button class="ghost" data-fold="${esc(kind)}" title="${folded ? 'show' : 'hide'}">${folded ? '▸' : '▾'}</button>`
         : ''}
@@ -862,7 +959,13 @@ function renderPlan() {
   el.resetPlan.disabled = !state.autoPlan;
   if (!plan) { drawMarkers(); return; }
 
-  const kinds = [...new Set([...KIND_ORDER, ...plan.items.map((i) => i.kind)])];
+  // A mold with no core has nothing for a plate or a tab to attach to, so its
+  // empty core groups are not an invitation, they are noise. Ones that somehow
+  // hold items stay, because a plan carried over from a core mold should show
+  // what is in it rather than hide it.
+  const hasCore = Boolean(state.lastReport?.core);
+  const kinds = [...new Set([...KIND_ORDER, ...plan.items.map((i) => i.kind)])]
+    .filter((k) => hasCore || !CORE_KINDS.has(k) || itemsOfKind(k).length);
   el.featureList.innerHTML = kinds.map(groupHtml).join('');
   // "Some of them are on" is not something a checkbox can be told in markup.
   for (const box of el.featureList.querySelectorAll('[data-group-toggle]')) {
@@ -1344,6 +1447,7 @@ function moldConfig() {
     keys: { enabled: el.optKeys.checked },
     spout: { enabled: el.optSpout.checked },
     vents: { enabled: el.optVents.checked },
+    ...(state.pourChoice ? { pour_axis: state.pourChoice } : {}),
     core: { enabled: el.optCore.checked, wall: Number(el.coreWall.value) },
     carrier: { enabled: el.optCarrier.checked },
     core_dowels: { enabled: el.optDowels.checked },
@@ -1378,10 +1482,42 @@ el.suggest.onclick = async () => {
 };
 
 el.fromView.onclick = () => {
-  const d = new THREE.Vector3().subVectors(controls.target, camera.position).normalize();
-  setDirection([d.x, d.y, d.z]);
+  // The inverse of standing the part up: tumble it until it sits the way you
+  // want it pulled, press, and the frame takes whatever is now up on screen.
+  // (The view then snaps to that exactly, which from here is a small move.)
+  const up = viewUp();
+  setDirection([up.x, up.y, up.z]);
   requestHeatmap();
 };
+
+/* ---- the pour axis ----
+ *
+ * A build input, beside the block and the grid, because it decides where the
+ * spout and the vents get *placed* and placement happens once. Aiming it after
+ * the fact would move the cut and leave the spout where it was put, which is
+ * half an answer.
+ */
+
+function setPourChoice(axis) {
+  state.pourChoice = axis;
+  el.pourVal.textContent = axis
+    ? axis.map((v) => v.toFixed(2)).join(', ')
+    : 'auto';
+  el.pourAuto.classList.toggle('active', !axis);
+  el.pourFromView.classList.toggle('active', Boolean(axis));
+  orientGizmo();
+}
+
+el.pourFromView.onclick = () => {
+  // Up on screen, not the way the camera looks: the pour axis is which way is
+  // up when the mold is stood on the bench and filled. Straight after a pull
+  // direction is set that *is* the pull axis, since the view stands the part
+  // up along it -- orbit over the top first to aim somewhere else.
+  const up = viewUp();
+  setPourChoice([up.x, up.y, up.z]);
+};
+
+el.pourAuto.onclick = () => setPourChoice(null);
 
 el.build.onclick = async () => {
   el.build.disabled = true;
@@ -1446,7 +1582,10 @@ async function showResult(job) {
     };
   }
   if (job.result.plan) {
-    if (job.kind === 'mold') { state.autoPlan = job.result.plan; state.autoPlanBase = job.id; }
+    if (job.kind === 'mold') {
+      state.autoPlan = job.result.plan;
+      state.autoPlanBase = job.id;
+    }
     setPlan(job.result.plan, { statuses });
     if (job.kind !== 'mold') {
       state.autoPlan = await automaticPlan(job);

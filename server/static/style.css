@@ -214,9 +214,17 @@ select {
 .grp-head { display: flex; align-items: center; gap: 7px; padding: 7px 8px; }
 .grp-head input[type=checkbox] { margin: 0; flex: 0 0 auto; }
 .grp-head .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 7px; }
+/* One per kind, matching KIND_COLOUR in app.js so a group's dot and its
+   markers in the viewport are the same colour. */
 .grp-head .dot.key { background: #52a8ff; }
 .grp-head .dot.spout { background: var(--ok); }
 .grp-head .dot.vent { background: var(--warn); }
+.grp-head .dot.plate { background: #b07ad6; }
+.grp-head .dot.core_tab { background: #3fc4c4; }
+.grp-head .dot.dowel { background: #ff8a5c; }
+.grp-head .dot.screw { background: #9aa7b6; }
+.grp-head .dot.port { background: #6fd08c; }
+.grp-head .dot.pour { background: var(--accent); }
 .grp-head .grp-name { font-size: 12px; font-weight: 600; }
 .grp-head .count { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
 .grp-head .add { margin-left: auto; }
@@ -396,3 +404,8 @@ select {
   line-height: 1.5;
 }
 .grp > .grp-note { margin: 0 0 4px; }
+
+
+/* The pour axis lives in the build panel, so its row needs the hint to sit
+   between the label and the buttons rather than above everything. */
+#row-pour .hint { margin: 0 0 8px; }

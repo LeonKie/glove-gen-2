@@ -34,10 +34,9 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5 --plate --dowels 2
 
-# or use the web app: "Cast a hollow glove" under Mold turns the core on, the
-# plate, dowels and tabs are opt-in beside it, and every one of them becomes
-# an editable row once the mold is built — including a slider for where the
-# plate's plane cuts. Re-applying does not rebuild the mold or the core.
+# or use the web app: aim the pour axis and turn on "Cast a hollow glove"
+# under Mold, then every knob, hole and core part becomes an editable row once
+# the mold is built. Re-applying does not rebuild the mold or the core.
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -91,6 +90,17 @@ Sanity check that the crossing model is right: summing the *material* intervals
 instead of the gaps reproduces `mesh.volume` to 0.1% on every test shape, and
 exactly (708.12 cm³) on the hand.
 
+**In the viewer, `d` is up.** Rather than draw an arrow and leave you to decode
+which way the halves come off, the camera is rolled so the pull direction points
+up the screen: the part is simply *seen* standing the way it will be pulled.
+Nothing is baked into the mesh — `d` stays where it always was, in the job's
+frame, so the outputs keep the scan's coordinates and changing the pull costs a
+camera move rather than re-loading and re-decimating a two-million-triangle
+scan. `camera.up` rides on `d`, so orbiting sideways spins around the pull axis
+and leaves it upright; orbiting over the top tilts it away, and **From view up**
+is the way back — tumble the part to how you want it pulled, press, and the
+frame takes whatever is now up on screen.
+
 ### 2. Parting surface
 
 The parting surface is a **height field** `z = h(x, y)` in the frame where `d` is
@@ -133,6 +143,25 @@ and the block's outside, which the block's construction guarantees by definition
 `--block hull` uses the part's convex hull dilated by the margin instead of a
 rectangular box: the same minimum-wall guarantee with **55% less material**
 (1575 cm³ vs 3515 cm³ on the hand).
+
+#### Which way the box is turned
+
+One of the box's axes is the pull direction. The other two are the pull frame's
+roll about it, and `Frame.from_direction` picks that from the direction *alone* —
+the model never enters into it, and on an axis-aligned pull it lands on the world
+axes. So the box used to be sized by how the scan happened to sit in world
+coordinates rather than by its own shape: rotating a hand-and-forearm scan about
+the pull axis, which changes nothing real, swung the block from 1253 to 1569 cm³.
+
+The roll now comes from the part. The minimum-area rectangle enclosing a convex
+polygon always has a side flush with one of its edges, so trying each edge of the
+projected hull in turn is exact rather than a search, and costs nothing on a hull
+that is already cached. The same sweep now gives 1253 cm³ at every rotation.
+
+A carrier plate overrides it and squares the block to the pour axis instead:
+the plate is cut on that plane, and slicing an obliquely-rolled box gives a
+corner wedge rather than a slab. A few percent of block is nothing beside a
+plate that is not a plate.
 
 ### 4. Mold features
 
@@ -255,6 +284,19 @@ The core is trimmed a merge depth *above* the plane rather than at it. The stub
 that leaves sticking up is inside the plate, which turns the union of core and
 plate from a coplanar boolean into an overlapping one, and the space it occupies
 is space the halves have just vacated, so nothing can foul on it.
+
+**The cut is square to the pour axis, and there is only one of each.** The plate
+is the top of the mold and the port through it is the way in, so which way the
+mold fills and which way the cut faces cannot sensibly differ: the plan carries a
+single `pour_axis` rather than a plate normal beside it. And a second plate's
+plane would slice away the plate the first one made, so the editor does not offer
+one and the pass refuses it if a hand-edited plan contains it anyway.
+
+Aiming that axis is a **build** input, not an edit — `cfg.pour_axis`, beside the
+block shape and the parting grid. It decides where the spout and the vents get
+*placed*, and placement happens once; aiming it afterwards would move the cut
+and leave the spout where it was put. What stays editable is the cut's offset
+*along* it, which is the plate's own position and costs nothing to change.
 
 The screws that hold it down alternate between the halves: all four in one half
 holds that half down and leaves the other loose. They are the one thing here

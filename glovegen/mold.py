@@ -27,10 +27,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import trimesh
+from scipy.spatial import ConvexHull
 
 from . import meshio, parting, validate
 from .config import MoldConfig
-from .frame import Frame
+from .frame import Frame, unit
 from .parting import PartingSurface
 
 log = logging.getLogger(__name__)
@@ -60,6 +61,41 @@ class MoldResult:
     cavity: trimesh.Trimesh | None = None
     timings: dict = field(default_factory=dict)
     stats: dict = field(default_factory=dict)
+
+
+def snug_roll(mesh: trimesh.Trimesh, direction) -> np.ndarray:
+    """The roll about ``direction`` that makes the smallest box, as a world vector.
+
+    A box block is the hull's bounding box *in the pull frame*, so one of its
+    axes is the pull direction and the other two are whatever roll the frame
+    happens to carry. ``Frame.from_direction`` picks that roll from the
+    direction alone -- the model never enters into it -- and on an
+    axis-aligned pull it lands on the world axes. The block is then sized by
+    how the scan happens to sit in world coordinates rather than by its own
+    shape: on a hand-and-forearm, rotating the scan about the pull axis swings
+    the block by a quarter of its volume without changing anything real.
+
+    So pick the roll from the part instead. The minimum-area rectangle
+    enclosing a convex polygon always has a side flush with one of its edges,
+    so trying each edge in turn is exact rather than a search.
+    """
+    d = unit(direction)
+    frame = Frame.from_direction(d)
+    uv = frame.to_local(meshio.convex_hull(mesh).vertices)[:, :2]
+    try:
+        ring = uv[ConvexHull(uv).vertices]
+    except Exception:  # pragma: no cover - degenerate (flat or tiny) footprint
+        return frame.to_world([1.0, 0.0, 0.0])
+
+    best = (np.inf, 0.0)
+    edges = np.roll(ring, -1, axis=0) - ring
+    for angle in np.arctan2(edges[:, 1], edges[:, 0]):
+        c, s = np.cos(-angle), np.sin(-angle)
+        turned = ring @ np.array([[c, -s], [s, c]]).T
+        extent = turned.max(axis=0) - turned.min(axis=0)
+        best = min(best, (float(extent[0] * extent[1]), float(angle)))
+
+    return frame.to_world([np.cos(best[1]), np.sin(best[1]), 0.0])
 
 
 def build_block(
@@ -180,16 +216,24 @@ def build_mold(
     report = progress or (lambda *a, **k: None)
     timings: dict[str, float] = {}
 
-    # The roll of the pull frame is normally arbitrary. A core run pins it to
-    # the pour axis so two of the block's faces come out square to it: the
-    # carrier plate is trimmed perpendicular to the pour axis, and slicing an
-    # arbitrarily-rolled box on an oblique plane gives a corner wedge instead of
-    # a plate. Imported here because features.py builds on this module.
-    seed = None
+    # The roll of the pull frame decides two of the block's three axes, and
+    # left to `align_vectors` it is a function of the pull direction alone.
+    # Two things want a say in it, and they disagree:
+    #
+    #  - a carrier plate is cut square to the pour axis, and slicing an
+    #    arbitrarily-rolled box on an oblique plane gives a corner wedge rather
+    #    than a plate. Squareness wins there, easily: a plate that is not a
+    #    slab is not a plate, and a few percent of block is nothing beside it.
+    #  - otherwise nothing cares about the roll except the block's own size, so
+    #    it goes to whatever makes the block smallest.
+    #
+    # (features is imported here because it builds on this module.)
     if cfg.core.enabled and cfg.carrier.enabled:
         from .features import choose_pour_axis
 
         seed = choose_pour_axis(mesh, cfg)
+    else:
+        seed = snug_roll(mesh, direction)
     frame = Frame.from_direction(direction, seed=seed)
 
     cavity = mesh

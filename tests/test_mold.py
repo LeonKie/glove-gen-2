@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import trimesh
 
 from glovegen import mold, validate
-from glovegen.frame import Frame
+from glovegen.config import MoldConfig
+from glovegen.frame import Frame, unit
 
 
 class TestBlock:
@@ -129,3 +131,58 @@ class TestCavityOffset:
         assert grown.volume > sphere.volume
         # A 20mm sphere grown by 2mm should approach a 22mm sphere.
         assert grown.volume == pytest.approx(4 / 3 * np.pi * 22**3, rel=0.05)
+
+
+class TestSnugRoll:
+    """The roll about the pull direction, which decides two of the block's axes."""
+
+    def test_the_block_no_longer_depends_on_how_the_scan_sits(self, dumbbell):
+        """Rotating the scan about the pull axis changes nothing real.
+
+        It used to change the block by a quarter of its volume, because the
+        frame's roll came from `align_vectors` -- a function of the pull
+        direction alone -- and so the box was sized by world coordinates rather
+        than by the part.
+        """
+        # A dumbbell is round about its own axis, so give it a footprint with a
+        # long way and a short way to be wrong about.
+        slab = trimesh.creation.box(extents=[60, 12, 8])
+        part = dumbbell
+        part = trimesh.boolean.union([part, slab], engine="manifold", check_volume=False)
+
+        d = unit([0, 0, 1])
+        volumes = []
+        for deg in (0, 20, 40, 60, 80):
+            turned = part.copy()
+            turned.apply_transform(
+                trimesh.transformations.rotation_matrix(np.radians(deg), d)
+            )
+            frame = Frame.from_direction(d, seed=mold.snug_roll(turned, d))
+            _, bounds = mold.build_block(turned, frame, 8.0)
+            volumes.append(float(np.prod(bounds[1] - bounds[0])))
+
+        spread = (max(volumes) - min(volumes)) / min(volumes)
+        assert spread < 0.02, f"block still swings {spread:.0%} with the scan's rotation"
+
+    def test_it_is_never_worse_than_the_roll_it_replaces(self, two_prong):
+        d = unit([0, 0, 1])
+        plain = Frame.from_direction(d)
+        snug = Frame.from_direction(d, seed=mold.snug_roll(two_prong, d))
+        def footprint(frame):
+            lo, hi = mold.build_block(two_prong, frame, 8.0)[1]
+            return float(np.prod((hi - lo)[:2]))
+
+        assert footprint(snug) <= footprint(plain) + 1e-6
+
+    def test_a_core_run_still_squares_the_block_to_the_pour_axis(self, taper):
+        """The plate wins over the block: a plate that is not a slab is not a plate."""
+        cfg = MoldConfig(block_margin=8.0)
+        cfg.parting.grid = 60
+        cfg.core.enabled = True
+        cfg.core.faces = 4_000
+        cfg.carrier.enabled = True
+        built = mold.build_mold(taper, [1, 0, 0], cfg)
+        from glovegen.features import choose_pour_axis
+
+        p = unit(choose_pour_axis(taper, cfg))
+        assert abs(abs(built.frame.rot[0] @ p) - 1.0) < 1e-6
