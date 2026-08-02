@@ -133,6 +133,25 @@ and the block's outside, which the block's construction guarantees by definition
 rectangular box: the same minimum-wall guarantee with **55% less material**
 (1575 cm³ vs 3515 cm³ on the hand).
 
+#### Which way the box is turned
+
+One of the box's axes is the pull direction. The other two are the pull frame's
+roll about it, and `Frame.from_direction` picks that from the direction *alone* —
+the model never enters into it, and on an axis-aligned pull it lands on the world
+axes. So the box used to be sized by how the scan happened to sit in world
+coordinates rather than by its own shape: rotating a hand-and-forearm scan about
+the pull axis, which changes nothing real, swung the block from 1253 to 1569 cm³.
+
+The roll now comes from the part. The minimum-area rectangle enclosing a convex
+polygon always has a side flush with one of its edges, so trying each edge of the
+projected hull in turn is exact rather than a search, and costs nothing on a hull
+that is already cached. The same sweep now gives 1253 cm³ at every rotation.
+
+A carrier plate overrides it and squares the block to the pour axis instead:
+the plate is cut on that plane, and slicing an obliquely-rolled box gives a
+corner wedge rather than a slab. A few percent of block is nothing beside a
+plate that is not a plate.
+
 ### 4. Mold features
 
 Two geometric facts drive these:
