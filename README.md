@@ -27,6 +27,10 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --key-radius 7 --spout-outer 1
 # or hand it the plan from a previous run, edited
 glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 
+# which way is up when the mold is filled: aims the spout, finds the air
+# pockets, squares the block. Defaults to the part's long axis, fat end up
+glovegen mold data/samples/Hand_Child.stl -o out/ --pour-axis 0 0 1
+
 # cast a hollow glove instead of a solid positive. --wall adds core.stl and
 # nothing else; --plate cuts the mold on a plane and caps it, --dowels bores
 # through all three bodies for loose registration pins, --tabs mould the same
@@ -34,10 +38,12 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5 --plate --dowels 2
 
-# or use the web app: "Cast a hollow glove" under Mold turns the core on, the
-# plate, dowels and tabs are opt-in beside it, and every one of them becomes
-# an editable row once the mold is built — including a slider for where the
-# plate's plane cuts. Re-applying does not rebuild the mold or the core.
+# or use the web app: the pour axis is picked by standing the mold up in the
+# viewport — drag the arrow off the bench it would be filled on, and the spout
+# and air pockets follow it live. "Cast a hollow glove" under Mold turns the
+# core on, the plate, dowels and tabs are opt-in beside it, and every one of
+# them becomes an editable row once the mold is built — including a slider for
+# where the plate's plane cuts. Re-applying does not rebuild the mold or core.
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -91,7 +97,27 @@ Sanity check that the crossing model is right: summing the *material* intervals
 instead of the gaps reproduces `mesh.volume` to 0.1% on every test shape, and
 exactly (708.12 cm³) on the hand.
 
-### 2. Parting surface
+### 2. Pour axis
+
+The pull direction says how the mold **opens**. The pour axis says which way is
+**up when it is filled**, and it decides a surprising amount: where the spout
+breaks into the cavity (the cavity's high point along it), where the air pockets
+are that need venting (local maxima of the cavity's ceiling along it), which
+plane a carrier plate cuts on, and — because the block's frame is rolled to line
+up with it — which way the block itself is squared.
+
+It defaults to the part's longest principal axis oriented **fat-end-up**; on the
+hand scan that correctly puts the cut wrist at the top with the fingers hanging
+down, which is the orientation that traps the least air. `--pour-axis X Y Z`
+pins it instead, as does `pour_axis` in a config.
+
+`glovegen.features.pour_preview` answers what a candidate axis decides —
+entry point, air pockets, extent along the axis and across it — from projections
+and one grid of rays against the analysis proxy, with no block, no parting
+surface and no booleans. That costs tens of milliseconds, which is what lets the
+web app answer while the axis is being dragged rather than after a job.
+
+### 3. Parting surface
 
 The parting surface is a **height field** `z = h(x, y)` in the frame where `d` is
 +Z, defined over the whole block footprint. That one choice buys a lot: a height
@@ -118,7 +144,7 @@ Grid resolution affects **seam quality, not correctness**: coarsening it moves
 where the seam sits on the cast, but `h` stays inside the cavity either way, so
 the halves still reproduce the shape exactly.
 
-### 3. Block, and the split
+### 4. Block, and the split
 
 ```
 mold   = block − part
@@ -134,7 +160,7 @@ and the block's outside, which the block's construction guarantees by definition
 rectangular box: the same minimum-wall guarantee with **55% less material**
 (1575 cm³ vs 3515 cm³ on the hand).
 
-### 4. Mold features
+### 5. Mold features
 
 Two geometric facts drive these:
 
@@ -159,17 +185,14 @@ pull direction, where they release by construction. Never in between.
 
   Every size is per key, not per mold: `radius`, `height`, `draft_deg` and the
   socket `clearance`.
-- **Pour spout** — a funnel into the cavity's extreme along the pour axis,
-  centred on the parting surface. The pour axis defaults to the part's longest
-  principal axis oriented **fat-end-up**; on the hand scan that correctly puts
-  the cut wrist at the top with the fingers hanging down, which is the
-  orientation that traps the least air.
+- **Pour spout** — a funnel into the cavity's extreme along the [pour
+  axis](#2-pour-axis), centred on the parting surface.
 - **Vents** — thin channels from cavity high points out to the block surface.
   High points are found as local maxima of the cavity's ceiling along the pour
   axis, one per connected pocket (a flat ceiling is one pocket however many cells
   it spans). Each is routed along whichever of `±d` does not re-enter the cavity.
 
-### 5. Choosing the features, and changing your mind
+### 6. Choosing the features, and changing your mind
 
 Deciding *where* the knobs and holes go is separated from cutting them. The
 automatic pass emits a **feature plan** — a flat, serialisable list of items,
@@ -210,7 +233,7 @@ whose every route back out re-enters the cast, is reported as `skipped` with the
 reason and the rest of the plan is still cut — one bad hand-placed item is not a
 reason to throw away a mold that took a minute to build.
 
-### 6. Casting a glove: the core, and stopping it float
+### 7. Casting a glove: the core, and stopping it float
 
 Everything above casts a **solid** positive. A glove is a wall, so it needs a
 second body inside the cavity — the core — with the cast forming in the gap.
@@ -261,9 +284,9 @@ holds that half down and leaves the other loose. They are the one thing here
 that goes in *after* the mold is shut, which is why they are also the one thing
 allowed to sit off the parting seam.
 
-The block's pull frame is rolled to line up with the pour axis when a core is
-asked for, so a box block has two faces square to the cut. Without that, slicing
-an arbitrarily-rolled box on an oblique plane gives a corner wedge.
+The block's pull frame is rolled to line up with the pour axis, so a box block
+has two faces square to the cut. Without that, slicing an arbitrarily-rolled box
+on an oblique plane gives a corner wedge.
 
 #### Sealing the annulus means the pour moves
 
@@ -372,7 +395,7 @@ centres and never overshoots: `ball_subdivisions` 1 costs 6.5% of the wall in
 One interaction worth knowing: `--block hull` ends the block in a dome, so a
 plate cut near the end is trimmed from a small cap of it.
 
-### 7. Verification
+### 8. Verification
 
 `validate.separation_report` measures rather than assumes, by sliding the halves
 and intersecting:
@@ -455,17 +478,19 @@ glovegen/
   demold.py         pull-direction search, per-face undercut heatmap
   parting.py        constrained height field -> parting surface + solid
   mold.py           block, block−part, the split
-  features.py       the feature plan: choosing keys/spout/vents, and cutting them
+  features.py       the pour axis and its preview; the feature plan:
+                    choosing keys/spout/vents, and cutting them
   core.py           hollow-cast core: erosion, the plane cut, plate and tabs
   pipeline.py       orchestration + reporting, and re-cutting an edited plan
   validate.py       solid gating, separation measurement
   cli.py            glovegen analyze | mold
 server/
-  app.py            FastAPI: upload, heatmap, jobs, downloads
+  app.py            FastAPI: upload, heatmap, pour preview, jobs, downloads
   store.py          disk-backed persistence, TTL, orphan reaping
   worker.py         job bodies (prepare | analyze | mold | features), out-of-process
-  static/           three.js viewer: live heatmap, then the editable feature plan
-tests/              159 tests
+  static/           three.js viewer: live heatmap, the pour-axis handle, then
+                    the editable feature plan
+tests/              218 tests
 ```
 
 ## Deployment
@@ -554,6 +579,13 @@ image), `GLOVEGEN_TTL_HOURS` (24), `GLOVEGEN_MAX_UPLOAD_MB` (400),
 Everything geometric lives in `glovegen/config.py` as dataclasses and is
 accepted as a partial nested dict by the API, so
 `{"block_margin": 12, "parting": {"grid": 500}}` is a valid job config.
+
+`pour_axis` is either `"auto"` or a vector, and unlike the rest of the config it
+is validated at the request boundary rather than where it is read: it is only
+consulted deep inside the feature planner, and a job that dies forty seconds in
+is a poor way to learn about a typo. `POST /api/meshes/{id}/pour-preview` with
+`{"axis": [x, y, z]}` (or `"auto"`, or nothing) answers what an axis would
+decide, against the cached analysis proxy, in tens of milliseconds.
 
 Feature sizes are per item rather than per mold, so they live in the plan, not
 in the config — the config's `keys.radius`, `spout.outer_radius` and

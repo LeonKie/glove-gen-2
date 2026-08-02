@@ -633,9 +633,71 @@ def choose_pour_axis(mesh: trimesh.Trimesh, cfg: MoldConfig) -> np.ndarray:
     return unit(axis)
 
 
+def pour_preview(
+    cavity: trimesh.Trimesh, cfg: MoldConfig | None = None, *, axis=None
+) -> dict:
+    """What a candidate pour axis decides, without building anything.
+
+    Standing the mold up is a physical question -- which way is up when you fill
+    it -- and answering it by reading two angles off a slider is guesswork. This
+    is the feedback that makes it a direct one: where the spout would break in,
+    where the air would collect, and how far the part reaches along the axis and
+    across it. Every one of those is a projection or a ray cast against a proxy,
+    so it is cheap enough to recompute while the axis is being dragged.
+
+    ``axis`` of ``None`` resolves the automatic choice instead, which is how the
+    viewport gets something to show before anything has been picked.
+    """
+    from . import core as core_mod  # core builds on this module's primitives
+
+    cfg = cfg or MoldConfig()
+    p = choose_pour_axis(cavity, cfg) if axis is None else unit(axis)
+
+    entry = cavity_high_point(cavity, p)
+    traps: list[np.ndarray] = []
+    if cfg.vents.enabled:
+        traps = find_air_traps(cavity, p, cfg.vents, spout_world=entry)
+
+    # The hull is enough for the extents and is a few hundred vertices rather
+    # than a few hundred thousand.
+    hull = np.asarray(cavity.convex_hull.vertices, dtype=np.float64)
+    reach = hull @ p
+    centre = hull.mean(axis=0)
+    radial = hull - centre - np.outer((hull - centre) @ p, p)
+
+    return {
+        "axis": [round(float(v), 6) for v in p],
+        "entry": [round(float(v), 3) for v in entry],
+        "vents": [[round(float(v), 3) for v in t] for t in traps],
+        # Along the axis and across it: the cut slider's range, and how wide the
+        # plate has to be drawn.
+        "span": [round(float(reach.min()), 3), round(float(reach.max()), 3)],
+        "radius": round(float(np.linalg.norm(radial, axis=1).max()), 3),
+        # Where a carrier plate would cut, so the viewport can show the cut
+        # moving with the axis rather than only after a build.
+        "plate_point": [
+            round(float(v), 3)
+            for v in core_mod.default_plate_point(cavity, p, cfg)
+        ],
+    }
+
+
 # --------------------------------------------------------------------------
 # pour spout
 # --------------------------------------------------------------------------
+
+
+def cavity_high_point(cavity: trimesh.Trimesh, pour_axis) -> np.ndarray:
+    """The cavity's extreme along the pour axis: its highest point once poured.
+
+    Split out from :func:`spout_entry` because it needs nothing but the mesh and
+    the axis -- no block, no parting surface -- which is what lets the axis be
+    previewed before the mold that would carry it exists.
+    """
+    v = np.asarray(cavity.vertices, dtype=np.float64)
+    proj = v @ unit(pour_axis)
+    top = proj >= np.percentile(proj, 99.5)
+    return v[top].mean(axis=0)
 
 
 def spout_entry(
@@ -643,14 +705,10 @@ def spout_entry(
 ) -> np.ndarray:
     """Where the funnel should break into the cavity, in world coordinates.
 
-    The cavity's extreme along the pour axis -- its highest point once the mold
-    is stood up to pour -- pulled onto the parting surface so each half gets a
-    clean half-round groove.
+    The cavity's high point along the pour axis, pulled onto the parting surface
+    so each half gets a clean half-round groove.
     """
-    v = np.asarray(cavity.vertices, dtype=np.float64)
-    proj = v @ unit(pour_axis)
-    top = proj >= np.percentile(proj, 99.5)
-    entry_world = v[top].mean(axis=0)
+    entry_world = cavity_high_point(cavity, pour_axis)
     # Over the short run through the block wall the parting surface barely
     # moves, so centring on it keeps the groove half-round to within a fraction
     # of a millimetre.

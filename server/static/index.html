@@ -52,8 +52,26 @@
       <dl id="undercut-stats" class="stats" hidden></dl>
     </section>
 
+    <section class="panel disabled" id="panel-pour">
+      <h2>3 · Pour axis</h2>
+      <p class="hint">
+        Which way is <b>up</b> when the assembled mold is stood on a bench and
+        filled. Drag the arrow to tip the mold over: it stands on the bench it
+        would be poured on, the spout follows the high point, and the dots are
+        air pockets the rising resin would close off. The block is squared to
+        this axis, and a carrier plate is cut across it.
+      </p>
+      <div class="btn-row">
+        <button id="btn-pour-auto" class="primary">Auto</button>
+        <button id="btn-pour-flip">Flip</button>
+        <button id="btn-pour-pick">Point up at…</button>
+      </div>
+      <div id="pour-status" class="status" hidden></div>
+      <dl id="pour-stats" class="stats" hidden></dl>
+    </section>
+
     <section class="panel disabled" id="panel-mold">
-      <h2>3 · Mold</h2>
+      <h2>4 · Mold</h2>
       <div class="row">
         <label for="margin">Wall margin <span class="val" id="margin-val">10 mm</span></label>
         <input type="range" id="margin" min="3" max="30" step="0.5" value="10">
@@ -122,7 +140,7 @@
     </section>
 
     <section class="panel" id="panel-features" hidden>
-      <h2>4 · Knobs &amp; holes <button id="btn-plan-reset" class="link">reset</button></h2>
+      <h2>5 · Knobs &amp; holes <button id="btn-plan-reset" class="link">reset</button></h2>
       <p class="hint">
         Placed automatically. A size set on a group moves every item in it;
         click a row to size that one on its own. Click a marker in the viewport
@@ -140,7 +158,7 @@
     </section>
 
     <section class="panel" id="panel-result" hidden>
-      <h2>5 · Result</h2>
+      <h2>6 · Result</h2>
       <dl id="result-stats" class="stats"></dl>
       <div id="downloads"></div>
     </section>

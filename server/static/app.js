@@ -14,6 +14,8 @@ const el = {
   az: $('az'), el: $('el'), azVal: $('az-val'), elVal: $('el-val'),
   suggest: $('btn-suggest'), fromView: $('btn-from-view'), suggestStatus: $('suggest-status'),
   undercutStats: $('undercut-stats'),
+  panelPour: $('panel-pour'), pourAuto: $('btn-pour-auto'), pourFlip: $('btn-pour-flip'),
+  pourPick: $('btn-pour-pick'), pourStatus: $('pour-status'), pourStats: $('pour-stats'),
   margin: $('margin'), marginVal: $('margin-val'),
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
@@ -53,6 +55,16 @@ const state = {
   folded: new Set(),    // kinds whose group is collapsed
   uid: 0,               // counter behind hand-placed ids
   pullDirection: [0, 0, 1],
+  // Which way is up when the mold is filled. Chosen by standing the model up in
+  // the viewport, so it is live state rather than a form field, and the plan's
+  // copy takes over once a mold has actually been built with it.
+  pourAxis: [0, 0, 1],
+  pourPreview: null,    // {entry, vents, span, radius, plate_point} for that axis
+  pourAbort: null,
+  pourTimer: null,
+  meshGen: 0,           // bumped per selectMesh, so a slow one cannot win
+  draggingPour: false,
+  pickingPour: false,   // "Point up at…": the next click on the scan is the top
   pourSpan: null,       // [min, max] of the scan along the pour axis, for the cut slider
   pourRadius: null,     // and its reach across that axis, for the plate marker
   defaults: null,       // MoldConfig defaults, from /api/status
@@ -89,6 +101,12 @@ scene.add(fill);
 const layers = { part: null, half_a: null, half_b: null, parting: null, core: null };
 const gizmo = new THREE.Group();
 scene.add(gizmo);
+// The pour axis: an arrow standing on the bench the mold would be filled on,
+// and the spout and air pockets that follow from it.
+const pourGizmo = new THREE.Group();
+scene.add(pourGizmo);
+const pourMarkers = new THREE.Group();
+scene.add(pourMarkers);
 // Where the knobs and holes are, drawn over whichever layer is showing.
 const markers = new THREE.Group();
 scene.add(markers);
@@ -235,8 +253,16 @@ async function refreshMeshList(selectId) {
  * ------------------------------------------------------------------ */
 
 async function selectMesh(meshId) {
+  // Two of these can be in flight at once -- boot picks up whatever was already
+  // in the store while a drop is still being prepared -- and the slower one
+  // used to finish last and win, leaving its scan on screen and its pour axis
+  // in place of the one that was asked for. The later call is the one that was
+  // asked for, so it invalidates the earlier.
+  const gen = ++state.meshGen;
+  const stale = () => gen !== state.meshGen;
   state.meshId = meshId;
   const { mesh } = await api(`/api/meshes/${meshId}`);
+  if (stale()) return;
   const s = mesh.stats;
   statsTable(el.meshStats, [
     ['triangles', s.faces.toLocaleString()],
@@ -247,6 +273,8 @@ async function selectMesh(meshId) {
   ]);
 
   const buf = await (await fetch(`/api/meshes/${meshId}/viewer.bin`)).arrayBuffer();
+  if (stale()) return;
+  state.meshId = meshId;
   setLayer('part', buildGeometry(decodeGGM2(buf)));
   frameModel(layers.part.geometry.boundingSphere);
 
@@ -257,10 +285,15 @@ async function selectMesh(meshId) {
   showLayer('part');
 
   el.panelDir.classList.remove('disabled');
+  el.panelPour.classList.remove('disabled');
   el.panelMold.classList.remove('disabled');
   el.panelResult.hidden = true;
   clearPlan();
+  setPickingPour(false);
   requestHeatmap();
+  // A new scan gets stood up the way it tapers, which is right often enough to
+  // be the starting point and visible enough to argue with.
+  fetchPourPreview(null);
 }
 
 function disposeLayer(name) {
@@ -289,6 +322,11 @@ function showLayer(name) {
   });
   el.legend.hidden = name !== 'part';
   gizmo.visible = name === 'part';
+  // The pour axis is picked against the scan, and once the mold is built the
+  // plan's own markers say the same things better.
+  pourGizmo.visible = name === 'part' && !state.plan;
+  pourMarkers.visible = pourGizmo.visible;
+  drawPourMarkers();
 }
 
 function frameModel(sphere) {
@@ -297,10 +335,14 @@ function frameModel(sphere) {
   controls.target.copy(sphere.center);
   camera.near = r / 200;
   camera.far = r * 60;
-  camera.position.copy(sphere.center).add(new THREE.Vector3(r * 1.5, -r * 1.7, r * 1.1));
+  // Far enough back that the whole scan fits with room for the gizmos around it.
+  // At the old distance a bounding sphere filled the frame exactly, which put
+  // the pull arrows' heads off the edge and the pour handle out of reach.
+  camera.position.copy(sphere.center).add(new THREE.Vector3(r * 1.95, -r * 2.2, r * 1.45));
   camera.updateProjectionMatrix();
   controls.update();
   buildGizmo(sphere);
+  buildPourGizmo(sphere);
 }
 
 /* ------------------------------------------------------------------ *
@@ -357,6 +399,310 @@ function buildGizmo(sphere) {
 function orientGizmo() {
   // Gizmo is modelled along +Y; rotate that onto the pull direction.
   gizmo.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), currentDirection());
+}
+
+/* ------------------------------------------------------------------ *
+ * pour axis: stand the mold up
+ *
+ * "Which way is up when you fill it" is a question about gravity, and two
+ * angles typed into a pair of sliders is a poor way to answer it. So the axis
+ * is a thing in the viewport instead: an arrow standing on the bench the mold
+ * would be poured on, which you grab and tip over. What the axis decides --
+ * where the resin goes in, where the air gets stuck -- is drawn on the scan and
+ * follows the drag, because that feedback is the whole reason to do it this
+ * way rather than with a slider.
+ * ------------------------------------------------------------------ */
+
+const POUR_COLOUR = 0xff5fa2;
+const POUR_UP = new THREE.Vector3(0, 1, 0);  // the arrow is modelled along +Y
+let pourHandle = null;   // the grab sphere at the arrow's tip
+let pourBench = null;    // the disc it stands on
+let pourShaft = null;    // a unit cylinder, scaled to reach from bench to tip
+let pourHead = null;
+let pourOffset = 36;     // how far to one side of the part the arrow stands
+let pourAnchor = new THREE.Vector3();
+let pourScale = 50;
+let pourArm = 50;        // how far the handle sits from the anchor: the trackball
+let pourGrab = null;     // where on that trackball the drag started
+
+function pourVector() {
+  return new THREE.Vector3(...state.pourAxis).normalize();
+}
+
+/** The axis in force: what a built mold used, or what is being picked. */
+function pourAxis() {
+  return new THREE.Vector3(...(state.plan?.pour_axis || state.pourAxis)).normalize();
+}
+
+/** Empty a group and give back its GPU buffers. Traverses, because the bench is
+ *  a group of its own and a group has no geometry to dispose. */
+function emptyGroup(group) {
+  group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
+  group.clear();
+}
+
+function buildPourGizmo(sphere) {
+  emptyGroup(pourGizmo);
+  pourAnchor = sphere ? sphere.center.clone() : new THREE.Vector3();
+  pourScale = Math.max(sphere?.radius ?? 50, 1);
+
+  // Local +Y is the axis, so the arrow stands *beside* the part rather than
+  // through it: one buried in the scan is one you cannot grab, and the camera
+  // frames the scan closely enough that an arrow long enough to escape it
+  // lengthways would have its tip off the edge of the viewport. Drawn over the
+  // scan for the same reason — it is a handle, not geometry.
+  //
+  // Its length is set in orientPourGizmo, where the bench height is known: a
+  // unit shaft scaled to reach from the floor up. An arrow floating in mid-air
+  // beside a floor is two claims about up; one standing on it is a plumb line.
+  const mat = () => new THREE.MeshBasicMaterial({ color: POUR_COLOUR, depthTest: false });
+  pourOffset = pourScale * 0.72;
+  pourShaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(pourScale * 0.011, pourScale * 0.011, 1, 12), mat());
+  pourHead = new THREE.Mesh(
+    new THREE.ConeGeometry(pourScale * 0.042, pourScale * 0.11, 20), mat());
+
+  // The grab target. Generous — a handle you have to hunt for is a slider with
+  // extra steps — and invisible, so the arrowhead is what you see and aim at.
+  pourHandle = new THREE.Mesh(
+    new THREE.SphereGeometry(pourScale * 0.17, 16, 12),
+    new THREE.MeshBasicMaterial({ visible: false }),
+  );
+
+  // The bench. Without something for the model to stand on, "up" is just
+  // another arrow; with it, tipping the arrow reads as tipping the mold. Drawn
+  // neutral rather than in the handle's colour: it is scenery, not a control.
+  pourBench = new THREE.Group();
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(pourScale * 1.15, 48),
+    new THREE.MeshBasicMaterial({
+      color: NEUTRAL, transparent: true, opacity: 0.06,
+      side: THREE.DoubleSide, depthWrite: false,
+    }),
+  );
+  disc.rotation.x = Math.PI / 2;  // circles are modelled in XY; the bench is XZ
+  pourBench.add(disc);
+  for (const f of [0.45, 0.8, 1.15]) {
+    const pts = [];
+    for (let i = 0; i <= 64; i++) {
+      const a = (i / 64) * Math.PI * 2;
+      pts.push(new THREE.Vector3(Math.cos(a) * pourScale * f, 0, Math.sin(a) * pourScale * f));
+    }
+    pourBench.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({
+        color: NEUTRAL, transparent: true, opacity: 0.22, depthWrite: false,
+      }),
+    ));
+  }
+  // A spoke out to where the arrow stands, so the handle off to the side and the
+  // floor under the part read as the same claim about which way is up.
+  pourBench.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(
+      [new THREE.Vector3(0, 0, 0), new THREE.Vector3(pourOffset, 0, 0)]),
+    new THREE.LineBasicMaterial({
+      color: POUR_COLOUR, transparent: true, opacity: 0.4, depthWrite: false,
+    }),
+  ));
+
+  pourGizmo.add(pourShaft, pourHead, pourHandle, pourBench);
+  orientPourGizmo();
+}
+
+function orientPourGizmo() {
+  pourGizmo.position.copy(pourAnchor);
+  pourGizmo.quaternion.setFromUnitVectors(POUR_UP, pourVector());
+  if (!pourBench) return;
+
+  // Drop the bench to the model's underside along the axis, so the scan sits on
+  // it instead of floating over it. Local +Y is the axis, so this is one number.
+  const span = state.pourPreview?.span;
+  const floor = span ? span[0] - pourAnchor.dot(pourVector()) : -pourScale;
+  pourBench.position.set(0, floor, 0);
+
+  // Then stand the arrow on it, tall enough to clear the scan but capped so the
+  // head stays inside the frame the camera was set to -- a handle off the edge
+  // of the viewport cannot be grabbed, which is the whole point of it.
+  const top = Math.min(
+    (span ? span[1] - pourAnchor.dot(pourVector()) : pourScale) + pourScale * 0.2,
+    pourScale * 0.95,
+  );
+  const len = Math.max(top - floor, pourScale * 0.4);
+  pourShaft.scale.y = len;
+  pourShaft.position.set(pourOffset, floor + len / 2, 0);
+  pourHead.position.set(pourOffset, floor + len, 0);
+  pourHandle.position.copy(pourHead.position);
+  pourArm = Math.hypot(pourOffset, floor + len);
+}
+
+function setPourAxis(v, { refresh = true } = {}) {
+  const p = new THREE.Vector3(v[0], v[1], v[2]);
+  if (p.lengthSq() < 1e-12) return;
+  p.normalize();
+  state.pourAxis = [p.x, p.y, p.z];
+  // A plan built against the old axis no longer describes this one; the axis it
+  // carries would otherwise win over the one on screen.
+  if (state.plan) state.plan.pour_axis = state.pourAxis;
+  // Whatever the last message said about the axis, it was about a different one.
+  // Callers that have something to say say it after this returns.
+  el.pourStatus.hidden = true;
+  orientPourGizmo();
+  drawPourMarkers();
+  if (refresh) requestPourPreview();
+}
+
+/** "Point up at…": arm the next click on the scan to name the top.
+ *
+ *  Dragging is for fine adjustment; this is for the gross move nobody wants to
+ *  drag their way to -- on a hand-and-forearm scan, "the wrist goes up" is one
+ *  click on the wrist.
+ */
+function setPickingPour(on) {
+  state.pickingPour = !!on;
+  el.pourPick.classList.toggle('active', state.pickingPour);
+  if (!state.pickingPour) {
+    if (!state.placing) el.placeHint.hidden = true;
+    return;
+  }
+  setPlacing(null);
+  showLayer('part');
+  el.placeHint.hidden = false;
+  el.placeHint.textContent = 'Click the end of the scan that should point up · Esc to cancel';
+}
+
+/* ---- dragging it ---- */
+
+/** Where the pointer lands on the trackball through the handle. */
+function arcballPoint(e) {
+  const ray = rayFrom(e).ray;
+  const closest = ray.closestPointToPoint(pourAnchor, new THREE.Vector3());
+  const off = closest.clone().sub(pourAnchor);
+  const d = off.length();
+  if (d >= pourArm) return off.normalize();  // past the silhouette: grab the rim
+  // Front face of the ball, so the handle tracks under the pointer.
+  const back = Math.sqrt(Math.max(pourArm * pourArm - d * d, 0));
+  return closest.addScaledVector(ray.direction, -back).sub(pourAnchor).normalize();
+}
+
+/** Turn the mold by however far the grabbed point has been dragged.
+ *
+ *  Rotating the axis *to* the pointer would be wrong: the handle stands off to
+ *  one side of the axis, so the axis is never where the pointer is. Carrying the
+ *  whole gizmo through the same rotation as the grabbed point is what makes the
+ *  thing under the pointer stay under the pointer.
+ */
+function dragPourTo(e) {
+  const to = arcballPoint(e);
+  if (!pourGrab) { pourGrab = to; return; }
+  const turn = new THREE.Quaternion().setFromUnitVectors(pourGrab, to);
+  pourGrab = to;
+  setPourAxis(pourVector().applyQuaternion(turn).toArray());
+}
+
+function pourHandleUnder(e) {
+  if (!pourGizmo.visible || !pourHandle) return false;
+  return rayFrom(e).intersectObject(pourHandle, false).length > 0;
+}
+
+/* ---- what the axis decides ---- */
+
+function requestPourPreview() {
+  clearTimeout(state.pourTimer);
+  state.pourTimer = setTimeout(fetchPourPreview, 120);
+}
+
+/** ``axis: null`` asks the server for the automatic choice instead. */
+async function fetchPourPreview(axis = state.pourAxis) {
+  if (!state.meshId) return;
+  state.pourAbort?.abort();
+  const ctrl = new AbortController();
+  state.pourAbort = ctrl;
+  // The axis travels in its own field, so the config must not carry a second
+  // copy: an "auto" request with the current axis still in the config resolves
+  // to that axis, and "Auto" quietly stops doing anything.
+  const { pour_axis: _ignored, ...config } = moldConfig();
+  try {
+    const res = await fetch(`/api/meshes/${state.meshId}/pour-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ axis, config }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const preview = await res.json();
+    state.pourPreview = preview;
+    // Only "auto" moves the axis; a dragged one is already where it was asked
+    // to be, and snapping it to a rounded round-trip would fight the pointer.
+    if (axis === null) {
+      state.pourAxis = preview.axis;
+      if (state.plan) state.plan.pour_axis = preview.axis;
+    }
+    orientPourGizmo();
+    drawPourMarkers();
+    showPourStats(preview);
+  } catch (err) {
+    if (err.name !== 'AbortError') say(el.pourStatus, `pour preview failed: ${err.message}`, 'err');
+  }
+}
+
+function showPourStats(p) {
+  const n = p.vents.length;
+  statsTable(el.pourStats, [
+    ['axis', p.axis.map((v) => v.toFixed(3)).join(', ')],
+    ['air pockets', String(n), n === 0 ? 'ok' : n > 4 ? 'warn' : ''],
+    ['height poured', `${(p.span[1] - p.span[0]).toFixed(0)} mm`],
+  ]);
+}
+
+function dot(colour, at, radius) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 16, 12),
+    new THREE.MeshBasicMaterial({
+      color: colour, transparent: true, opacity: 0.85, depthWrite: false, depthTest: false,
+    }),
+  );
+  mesh.position.copy(at);
+  return mesh;
+}
+
+function drawPourMarkers() {
+  emptyGroup(pourMarkers);
+  const p = state.pourPreview;
+  if (!p || !pourGizmo.visible) return;
+
+  const axis = pourVector();
+  const r = pourScale;
+  // The spout: where the resin goes in, and the short run it takes to get there.
+  const entry = new THREE.Vector3(...p.entry);
+  pourMarkers.add(dot(KIND_COLOUR.spout, entry, r * 0.05));
+  // Kept short: the entry is by definition at the top of the scan, so a funnel
+  // drawn to any real length runs straight off the top of the frame.
+  const funnel = new THREE.Mesh(
+    new THREE.ConeGeometry(r * 0.075, r * 0.16, 24, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: KIND_COLOUR.spout, transparent: true, opacity: 0.35,
+      side: THREE.DoubleSide, depthWrite: false,
+    }),
+  );
+  funnel.quaternion.setFromUnitVectors(POUR_UP, axis);
+  funnel.position.copy(entry).addScaledVector(axis, r * 0.08);
+  pourMarkers.add(funnel);
+
+  for (const v of p.vents) pourMarkers.add(dot(KIND_COLOUR.vent, new THREE.Vector3(...v), r * 0.04));
+
+  // The cut, but only when something is going to be cut on it.
+  if (el.optCore.checked && el.optCarrier.checked && p.plate_point) {
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(p.radius * 0.98, p.radius * 1.06, 64),
+      new THREE.MeshBasicMaterial({
+        color: KIND_COLOUR.plate, transparent: true, opacity: 0.55,
+        side: THREE.DoubleSide, depthWrite: false,
+      }),
+    );
+    ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axis);
+    ring.position.set(...p.plate_point);
+    pourMarkers.add(ring);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -600,6 +946,12 @@ function measurePourSpan() {
 function setPlan(plan, { statuses = null } = {}) {
   state.plan = clonePlan(plan);
   state.featureStatus = statuses || {};
+  // The built mold's axis is the real one from here on -- including for a job
+  // loaded out of the history, where nothing on screen chose it. The arrow is
+  // put away with the rest of the pour panel's feedback (see showLayer).
+  if (state.plan?.pour_axis) state.pourAxis = state.plan.pour_axis;
+  setPickingPour(false);
+  showLayer(state.layer);
   measurePourSpan();
   snapToCut();
   // Hand-placed ids carry a counter. A plan can arrive from a job built in an
@@ -625,6 +977,8 @@ function clearPlan() {
   el.panelFeatures.hidden = true;
   el.featuresStatus.hidden = true;
   drawMarkers();
+  // With no plan on screen the pour arrow is the thing to argue with again.
+  showLayer(state.layer);
 }
 
 /** What the last apply made of this item. Short enough for the row; the long
@@ -694,12 +1048,9 @@ function ctlHtml(spec, kind, id, { value, mixed }) {
  *
  *  The plate is not sized into place like a knob, it is *positioned*: the one
  *  number that matters is where its plane cuts, so that gets its own slider
- *  rather than being buried in a click-to-move.
+ *  rather than being buried in a click-to-move. The axis itself comes from
+ *  ``pourAxis()`` up in the pour section, which is where it is chosen.
  */
-function pourAxis() {
-  return new THREE.Vector3(...(state.plan?.pour_axis || [0, 0, 1])).normalize();
-}
-
 function planeOffset(item) {
   return new THREE.Vector3(...item.position).dot(pourAxis());
 }
@@ -1045,6 +1396,7 @@ function setPlacing(kind, moveId = null) {
   state.placing = kind;
   state.movingId = kind ? moveId : null;
   el.placeHint.hidden = !kind;
+  if (kind && state.pickingPour) setPickingPour(false);
   if (kind) {
     el.placeHint.textContent = (moveId ? MOVE_HINT : PLACE_HINT)[kind];
     const layer = PLACE_ON[kind];
@@ -1103,13 +1455,62 @@ function rayFrom(e) {
 let pressedAt = null;
 renderer.domElement.addEventListener('pointerdown', (e) => {
   pressedAt = [e.clientX, e.clientY];
+  // Grabbing the arrow is a drag, not an orbit. Orbiting is already off because
+  // the pointer is over the handle (see the hover below), so there is no race
+  // with OrbitControls to win here -- it never started.
+  if (pourHandleUnder(e)) {
+    state.draggingPour = true;
+    pourGrab = arcballPoint(e);
+    renderer.domElement.setPointerCapture?.(e.pointerId);
+  }
 });
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (state.draggingPour) {
+    dragPourTo(e);
+    return;
+  }
+  // Hovering the handle takes the pointer away from OrbitControls before it can
+  // claim it, which is what lets a drag on the arrow be a drag on the arrow.
+  const over = !state.placing && !state.pickingPour && pourHandleUnder(e);
+  controls.enabled = !over;
+  renderer.domElement.style.cursor = over ? 'grab'
+    : (state.placing || state.pickingPour) ? 'crosshair' : '';
+});
+
+for (const ev of ['pointerup', 'pointercancel']) {
+  renderer.domElement.addEventListener(ev, (e) => {
+    if (!state.draggingPour) return;
+    state.draggingPour = false;
+    pourGrab = null;
+    controls.enabled = true;
+    renderer.domElement.releasePointerCapture?.(e.pointerId);
+  });
+}
+
 renderer.domElement.addEventListener('pointerup', (e) => {
   const from = pressedAt;
   pressedAt = null;
-  if (!from || !state.plan) return;
+  if (!from) return;
   // An orbit ends in a pointerup too; only a press that barely moved is a click.
   if (Math.hypot(e.clientX - from[0], e.clientY - from[1]) > 4) return;
+
+  if (state.pickingPour) {
+    const hit = layers.part && rayFrom(e).intersectObject(layers.part, false)[0];
+    if (!hit) {
+      say(el.pourStatus, 'nothing there — click the scan itself', 'err');
+      return;
+    }
+    // The clicked point becomes the top: up is the way from the middle to it.
+    const up = hit.point.clone().sub(pourAnchor);
+    if (up.lengthSq() < 1e-9) return;
+    setPourAxis(up.toArray());
+    setPickingPour(false);
+    say(el.pourStatus, 'that end is up', 'ok');
+    return;
+  }
+
+  if (!state.plan) return;
 
   if (!state.placing) {
     // Which row is that one? Clicking a marker answers it.
@@ -1130,7 +1531,11 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   setPlacing(null);
 });
 
-addEventListener('keydown', (e) => { if (e.key === 'Escape') setPlacing(null); });
+addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  setPlacing(null);
+  setPickingPour(false);
+});
 
 /* ---- markers ---- */
 
@@ -1348,8 +1753,25 @@ function moldConfig() {
     carrier: { enabled: el.optCarrier.checked },
     core_dowels: { enabled: el.optDowels.checked },
     core_tabs: { enabled: el.optTabs.checked, count: Number(el.coreTabs.value) },
+    pour_axis: state.pourAxis,
   };
 }
+
+el.pourAuto.onclick = async () => {
+  el.pourAuto.disabled = true;
+  say(el.pourStatus, 'finding the natural pour…');
+  clearTimeout(state.pourTimer);
+  await fetchPourPreview(null);
+  el.pourAuto.disabled = false;
+  say(el.pourStatus, 'stood up the way the part tapers', 'ok');
+};
+
+el.pourFlip.onclick = () => {
+  setPourAxis(pourVector().negate().toArray());
+  say(el.pourStatus, 'upside down: fills from the other end', '');
+};
+
+el.pourPick.onclick = () => setPickingPour(!state.pickingPour);
 
 el.suggest.onclick = async () => {
   el.suggest.disabled = true;
@@ -1609,8 +2031,14 @@ el.coreWall.addEventListener('input', () => {
   el.coreWallVal.textContent = `${Number(el.coreWall.value).toFixed(1)} mm`;
 });
 el.coreTabs.addEventListener('input', () => { el.coreTabsVal.textContent = el.coreTabs.value; });
-el.optCore.addEventListener('change', () => { el.coreOptions.hidden = !el.optCore.checked; });
+el.optCore.addEventListener('change', () => {
+  el.coreOptions.hidden = !el.optCore.checked;
+  drawPourMarkers();  // the cut ring is only drawn when there is going to be one
+});
 el.optTabs.addEventListener('change', () => { el.rowCoreTabs.hidden = !el.optTabs.checked; });
+el.optCarrier.addEventListener('change', drawPourMarkers);
+// Vent detection is part of the preview, so switching it off empties the dots.
+el.optVents.addEventListener('change', () => requestPourPreview());
 
 el.layers.querySelectorAll('button').forEach((b) => {
   b.onclick = () => !b.disabled && showLayer(b.dataset.layer);
@@ -1623,6 +2051,7 @@ el.layers.querySelectorAll('button').forEach((b) => {
 (async function boot() {
   syncDirLabels();
   buildGizmo(null);
+  buildPourGizmo(null);
   try {
     const s = await api('/api/status');
     state.defaults = s.defaults;
@@ -1636,3 +2065,4 @@ el.layers.querySelectorAll('button').forEach((b) => {
   const ready = meshes.find((m) => m.state === 'ready');
   if (ready) { el.meshSelect.value = ready.id; await selectMesh(ready.id); }
 })();
+

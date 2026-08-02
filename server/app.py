@@ -18,7 +18,7 @@ from fastapi import Body, FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from glovegen import demold, viewer_format
+from glovegen import demold, features, viewer_format
 from glovegen.config import MoldConfig
 from glovegen.features import PARAM_BOUNDS, FeaturePlan
 
@@ -224,6 +224,39 @@ def mesh_heatmap(mesh_id: str, payload: dict = Body(...)):
     )
 
 
+def _axis_or_auto(raw, field: str):
+    """``None``/``"auto"`` -> None (let the pipeline choose); a vector -> a vector."""
+    if raw is None or (isinstance(raw, str) and raw == "auto"):
+        return None
+    if isinstance(raw, str):
+        raise HTTPException(422, f"{field} must be 'auto' or three numbers, got {raw!r}")
+    try:
+        v = np.asarray(raw, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, f"{field} must be three finite numbers") from exc
+    if v.shape != (3,) or not np.isfinite(v).all() or np.linalg.norm(v) < 1e-9:
+        raise HTTPException(422, f"{field} must be a non-zero finite 3-vector")
+    return [float(x) for x in v]
+
+
+@app.post("/api/meshes/{mesh_id}/pour-preview")
+def mesh_pour_preview(mesh_id: str, payload: dict = Body(...)) -> dict:
+    """What a candidate pour axis would decide, for the axis being dragged.
+
+    Runs against the cached analysis proxy rather than the full-resolution scan,
+    like the heatmap does, so it answers in a few tens of milliseconds and the
+    spout and the air pockets can follow the pointer instead of waiting on a
+    job. An axis of ``"auto"`` (or none at all) resolves the automatic choice.
+    """
+    _require_mesh(mesh_id)
+    axis = _axis_or_auto(payload.get("axis"), "axis")
+    try:
+        cfg = MoldConfig.from_dict(payload.get("config") or {})
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, f"bad config: {exc}") from exc
+    return features.pour_preview(_load_proxy(mesh_id), cfg, axis=axis)
+
+
 # --------------------------------------------------------------------------
 # jobs
 # --------------------------------------------------------------------------
@@ -283,8 +316,12 @@ def create_job(payload: dict = Body(...)) -> dict:
     if meta.get("state") != "ready":
         raise HTTPException(409, f"mesh is {meta.get('state')}, not ready")
 
-    # Validate the config here so a typo fails the request, not the job.
+    # Validate the config here so a typo fails the request, not the job. The
+    # pour axis in particular is only read deep inside the feature planner, and
+    # a job that dies forty seconds in is a poor way to learn about a typo.
     direction = config.pop("direction", None)
+    pour = _axis_or_auto(config.get("pour_axis"), "pour_axis")
+    config["pour_axis"] = pour if pour is not None else "auto"
     try:
         MoldConfig.from_dict(config)
     except (TypeError, ValueError) as exc:

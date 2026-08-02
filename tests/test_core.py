@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import trimesh
@@ -448,9 +450,22 @@ class TestPourAxisSeededFrame:
         p = unit(features.choose_pour_axis(taper, full_config))
         assert abs(abs(built.frame.rot[0] @ p) - 1.0) < 1e-6
 
-    def test_a_plain_run_leaves_the_roll_alone(self, taper, fast_config):
+    def test_a_plain_run_is_squared_to_it_too(self, taper, fast_config):
+        """The roll is not arbitrary just because nothing is cut on that plane.
+
+        A block whose faces answer to nothing is an orientation nobody chose;
+        squaring every run to the pour axis is what makes the block on screen
+        the block the user stood up.
+        """
         plain = mold.build_mold(taper, [1, 0, 0], fast_config)
+        p = unit(features.choose_pour_axis(taper, fast_config))
         assert plain.frame.rot[2] == pytest.approx(np.array([1.0, 0.0, 0.0]))
+        assert abs(abs(plain.frame.rot[0] @ p) - 1.0) < 1e-6
+
+    def test_an_explicit_axis_beats_the_automatic_one(self, taper, fast_config):
+        cfg = replace(fast_config, pour_axis=(0.0, 1.0, 0.0))
+        built = mold.build_mold(taper, [1, 0, 0], cfg)
+        assert abs(abs(built.frame.rot[0] @ np.array([0.0, 1.0, 0.0])) - 1.0) < 1e-6
 
 
 class TestFrameSeed:
