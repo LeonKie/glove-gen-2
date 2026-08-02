@@ -385,3 +385,14 @@ select {
   font-size: 11.5px;
   line-height: 1.45;
 }
+
+/* What a group is, for the ones whose name does not say it. A dowel and a
+   screw are both pins under the plate; which side of the seam they land on is
+   the whole difference, and no marker can show that. */
+.grp-note {
+  margin: 0 0 10px;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.grp > .grp-note { margin: 0 0 4px; }

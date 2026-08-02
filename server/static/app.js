@@ -600,6 +600,7 @@ function setPlan(plan, { statuses = null } = {}) {
   state.plan = clonePlan(plan);
   state.featureStatus = statuses || {};
   measurePourSpan();
+  snapToCut();
   // Hand-placed ids carry a counter. A plan can arrive from a job built in an
   // earlier session, so pull the counter past whatever is already in it rather
   // than minting an id the plan already uses.
@@ -702,6 +703,32 @@ function planeOffset(item) {
   return new THREE.Vector3(...item.position).dot(pourAxis());
 }
 
+/** Where the mold is cut, or null if no plate is cutting it. */
+function cutPlane() {
+  const plate = itemsOfKind('plate').find((i) => i.enabled);
+  return plate ? planeOffset(plate) : null;
+}
+
+// Everything that hangs off the plate lives on the plate's plane. The cut
+// decides how far along the pour axis they sit; a click only ever chooses
+// where *across* it they go.
+const ON_PLANE = new Set(['dowel', 'screw', 'port']);
+
+/** Slide the items that belong on the cut onto it.
+ *
+ *  Without this a dowel sits wherever the click landed on the parting surface
+ *  and its marker hangs there in mid-air, pointing along the pour axis and
+ *  attached to nothing you can see. The cut is applied server-side either way;
+ *  drawing it anywhere else is just a lie about where the dowel is.
+ */
+function snapToCut() {
+  const at = cutPlane();
+  if (at == null) return;
+  for (const item of state.plan?.items || []) {
+    if (ON_PLANE.has(item.kind)) setPlane(item, at);
+  }
+}
+
 function planeHtml(item) {
   const span = state.pourSpan;
   if (!span) return '';
@@ -752,15 +779,27 @@ function itemHtml(item, n) {
     </div>`;
 }
 
-// What an empty group means. For most kinds it is just "none"; for the core
-// ones it is the answer to "why is there nothing here", which is that they are
-// opt-in on top of the core rather than part of it.
-const EMPTY_NOTE = {
-  plate: 'none — adding one cuts the mold on a plane and caps it',
-  core_tab: 'none — “+ add” pinches one on the seam',
-  dowel: 'none — dowels register the plate to the block',
-  screw: 'none — screws clamp the plate down',
-  port: 'none — the port is the way in once the plate seals the annulus',
+// What each core group *is*. The mold features are self-explanatory from their
+// names; these are not, and the shapes in the viewport cannot say it either --
+// a dowel and a screw are both pins under the plate, and what separates them is
+// which side of the seam they land on.
+const GROUP_NOTE = {
+  plate: 'Cuts the mold on a plane and caps what is left. Everything past the '
+    + 'plane is thrown away — half A, half B and the core alike — so the '
+    + 'glove’s rim is the cut. Select the row to move it.',
+  core_tab: 'A post from the core out past the cast into mold that is solid on '
+    + 'both sides of the parting face, where closing the halves pinch it. Click '
+    + 'where it should be gripped; it reaches back to the nearest core, and '
+    + 'crosses the glove wall on the way.',
+  dowel: 'A pin down from the plate into a half-round bore shared by both '
+    + 'halves, so the plate references them equally instead of one of them. '
+    + 'Sits on the seam, at the plate’s face — a click only chooses where '
+    + 'along the seam.',
+  screw: 'Clamps the plate down, because a core floats rather than sinks. Each '
+    + 'has to land wholly inside one half: on the seam it would jack the halves '
+    + 'apart instead of holding them shut.',
+  port: 'The way in once the plate seals the cast: a funnel through it down to '
+    + 'the ring of glove at the cut. Only a wall thick, so it necks down.',
 };
 
 /** Something true about the group as a whole that a row cannot say.
@@ -773,9 +812,10 @@ function groupWarning(kind) {
   if (kind !== 'plate') return '';
   const plates = itemsOfKind('plate').filter((i) => i.enabled);
   if (!plates.length || itemsOfKind('dowel').some((i) => i.enabled)) return '';
-  return `<p class="grp-warn">Nothing locates this plate. Add seam dowels
-    below, or tick “Propose a carrier plate” above and build again to have them
-    placed for you.</p>`;
+  return `<p class="grp-warn">Nothing locates this plate. A dowel needs the ring
+    of mold between the cavity’s widest section and the block wall to be about
+    twice its radius plus 3 mm; if none were proposed, widen the wall margin or
+    shrink the dowel, then build again. Or add one below by hand.</p>`;
 }
 
 function groupHtml(kind) {
@@ -796,13 +836,16 @@ function groupHtml(kind) {
         ? `<button class="ghost" data-fold="${esc(kind)}" title="${folded ? 'show' : 'hide'}">${folded ? '▸' : '▾'}</button>`
         : ''}
     </div>`;
+  const note = GROUP_NOTE[kind] ? `<p class="grp-note">${esc(GROUP_NOTE[kind])}</p>` : '';
   if (!items.length) {
-    return `<div class="grp">${head}<p class="empty">${esc(EMPTY_NOTE[kind] || 'none — “+ add” places one by hand')}</p></div>`;
+    return `<div class="grp">${head}${note}` +
+      '<p class="empty">none — “+ add” places one by hand</p></div>';
   }
   return `
     <div class="grp${folded ? ' folded' : ''}">
       ${head}
       <div class="grp-body">
+        ${note}
         ${groupWarning(kind)}
         <div class="ctl-cap">${items.length > 1 ? `size · all ${items.length} ${labelN(kind).toLowerCase()}` : 'size'}</div>
         ${specsFor(kind).map((spec) => ctlHtml(spec, kind, null, groupValue(items, spec.name))).join('')}
@@ -872,6 +915,9 @@ el.featureList.addEventListener('input', (e) => {
     const at = Number(t.value);
     if (!item || !Number.isFinite(at)) return;
     setPlane(item, at);
+    // The dowels, screws and port stand on this plane; leaving them behind
+    // would show them detached from the plate they belong to.
+    snapToCut();
     for (const other of el.featureList.querySelectorAll(
       `[data-plane="${CSS.escape(t.dataset.plane)}"]`)) {
       if (other !== t && other.tagName === 'INPUT') other.value = fmt(at);
@@ -1024,6 +1070,7 @@ function addItem(kind, point) {
     params: defaultParams(kind),
     note: 'placed by hand',
   });
+  snapToCut();
   state.selected = id;
   renderPlan();
   planDirty(`${label1(kind).toLowerCase()} placed — re-apply to cut it`);
@@ -1036,6 +1083,7 @@ function moveItem(id, point) {
   // Its own position is the only thing that moved; a knob the last run refused
   // may well fit here, so the stale verdict is dropped rather than shown again.
   delete state.featureStatus[id];
+  snapToCut();
   state.selected = id;
   renderPlan();
   planDirty(`${label1(item.kind).toLowerCase()} moved — re-apply to cut it there`);
@@ -1084,6 +1132,29 @@ addEventListener('keydown', (e) => { if (e.key === 'Escape') setPlacing(null); }
 
 /* ---- markers ---- */
 
+/** A cylinder spanning two points: for anything whose direction is a result
+ *  rather than an input, like a tab reaching from the core out to its anchor. */
+function rodMarker(item, st, from, to, radius) {
+  const span = new THREE.Vector3().subVectors(to, from);
+  const len = Math.max(span.length(), 0.5);
+  const chosen = state.selected === item.id;
+  const mesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius, radius, len, 16),
+    new THREE.MeshBasicMaterial({
+      color: st.status === 'skipped' ? 0xe05c4b : KIND_COLOUR[item.kind],
+      transparent: true,
+      opacity: chosen ? 0.9 : item.enabled ? 0.6 : 0.15,
+      depthWrite: false,
+      depthTest: !chosen,
+    }),
+  );
+  mesh.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0), span.clone().normalize());
+  mesh.position.copy(from).addScaledVector(span, 0.5);
+  mesh.userData.id = item.id;
+  return mesh;
+}
+
 function drawMarkers() {
   for (const m of markers.children) { m.geometry.dispose(); m.material.dispose(); }
   markers.clear();
@@ -1124,8 +1195,16 @@ function drawMarkers() {
       axis = pour;
       offset = -Math.max(p.depth, 1) / 2;
     } else if (item.kind === 'core_tab') {
-      // Only the anchor is in the plan; which way the tab runs is decided
-      // against the core when it is cut, so the marker marks the anchor.
+      // Only the anchor is in the plan; which way the tab runs is worked out
+      // against the core when it is cut. Once it has been, the cut says where
+      // it gripped, and the tab can be drawn as the post it is instead of a
+      // bead floating on the seam.
+      const grip = st.detail?.core_world;
+      if (grip) {
+        markers.add(rodMarker(item, st, new THREE.Vector3(...grip),
+          new THREE.Vector3(...item.position), Math.max(p.radius, 1)));
+        continue;
+      }
       geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 16, 12);
     } else {
       geom = new THREE.SphereGeometry(Math.max(p.radius, 1.5), 14, 10);

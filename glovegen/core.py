@@ -1002,6 +1002,10 @@ def apply_tab(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
     return {
         "id": item.id,
         "anchor_world": [round(float(v), 2) for v in surface.frame.to_world(outer_local)],
+        # Where it actually grips the core. Only the anchor is in the plan --
+        # this end is worked out against the core here -- so handing it back is
+        # the only way a viewer can draw the tab rather than guess at it.
+        "core_world": [round(float(v), 2) for v in surface.frame.to_world(inner_local)],
         "length_mm": round(span, 2),
         "anchor_clearance_mm": round(room, 2),
         "seam_drift_mm": round(drift, 3),
