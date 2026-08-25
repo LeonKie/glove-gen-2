@@ -63,6 +63,11 @@ def _config_from_args(args) -> MoldConfig:
         cfg.core.wall = args.wall
     if getattr(args, "core_faces", None) is not None:
         cfg.core.faces = args.core_faces
+    # The second mold type: a core that is left inside the cast. It bolts to the
+    # plate rather than being moulded into it, so there has to *be* a plate.
+    if getattr(args, "prosthesis", False):
+        cfg.core.mode = "prosthesis"
+        cfg.carrier.enabled = True
     # The plate and the tabs are opt-in on top of the core, so asking for
     # either is what switches it on.
     if getattr(args, "plate", False) or getattr(args, "plate_thickness", None):
@@ -79,6 +84,8 @@ def _config_from_args(args) -> MoldConfig:
         (cfg.carrier, "cut_inset", "cut_inset"),
         (cfg.carrier, "plate_thickness", "plate_thickness"),
         (cfg.carrier, "screw_count", "screws"),
+        (cfg.core_mount, "count", "mount_screws"),
+        (cfg.core_mount, "radius", "mount_radius"),
     ):
         value = getattr(args, option, None)
         if value is not None:
@@ -256,7 +263,9 @@ def main(argv: list[str] | None = None) -> int:
     core = p_mo.add_argument_group(
         "hollow cast",
         "Cast a glove rather than a solid positive. --wall adds the core and "
-        "nothing else; the plate and the tabs are opt-in on top of it.",
+        "nothing else; the plate and the tabs are opt-in on top of it. "
+        "--prosthesis switches to the other mold type, where the core is left "
+        "inside the cast rather than pulled back out of it.",
     )
     core.add_argument(
         "--wall", type=float, default=None,
@@ -291,6 +300,20 @@ def main(argv: list[str] | None = None) -> int:
              "the loose pin, at the cost of a tab to drag out of the glove",
     )
     core.add_argument("--tab-radius", type=float, default=None, help="seam tab radius, mm")
+    core.add_argument(
+        "--prosthesis", action="store_true",
+        help="the other mold type: the core is left inside the cast, so it is "
+             "printed separately and bolted to the plate instead of moulded "
+             "into it. Implies --plate, and writes carrier_plate.stl",
+    )
+    core.add_argument(
+        "--mount-screws", type=int, default=None,
+        help="screws holding a detachable core to the plate (--prosthesis only)",
+    )
+    core.add_argument(
+        "--mount-radius", type=float, default=None,
+        help="pilot radius of the core's mount screws, mm",
+    )
     p_mo.add_argument(
         "--plan",
         type=Path,

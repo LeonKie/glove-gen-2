@@ -360,6 +360,69 @@ class TestRoundTrip:
         # The erosion is the expensive step and it is not repeated.
         assert "core_erode" not in done["result"]["report"]["timings_s"]
 
+    def test_a_prosthesis_mold_hands_back_the_plate_as_its_own_part(
+        self, client, part_bytes
+    ):
+        """The fourth body has to reach the browser the same way the core does.
+
+        A prosthesis leaves its core inside the cast, so the plate is not part
+        of the core any more: it is a separate download, a separate preview and
+        the thing the core unbolts from.
+        """
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball8.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+
+        job_id = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "mold",
+                "config": {
+                    "block_margin": 8,
+                    "parting": {"grid": 60},
+                    "direction": [0, 0, 1],
+                    "vents": {"enabled": False},
+                    "core": {"enabled": True, "wall": 2.0, "mode": "prosthesis"},
+                    "carrier": {"enabled": True},
+                    "core_mount": {"count": 1},
+                },
+            },
+        ).json()["job"]["id"]
+        job = _wait_job(client, job_id)
+        assert job["state"] == "done", job.get("message")
+
+        report = job["result"]["report"]
+        assert report["core"]["detachable"]
+        assert report["core"]["detach"]["detaches"]
+        assert len(report["core"]["core_screws"]) >= 1
+        assert report["halves"]["carrier_plate"]["faces"] > 0
+
+        assert "plate" in job["result"]["previews"]
+        assert client.get(f"/api/jobs/{job_id}/preview/plate.bin").status_code == 200
+        assert "carrier_plate.stl" in job["parts"]
+        stl = client.get(f"/api/jobs/{job_id}/files/carrier_plate.stl")
+        assert stl.status_code == 200 and len(stl.content) > 1000
+
+        # Which mold type this is comes from the config the mold job was built
+        # with, so a re-cut of an edited plan has to still be a prosthesis.
+        edit_id = client.post(
+            "/api/jobs",
+            json={
+                "kind": "features",
+                "config": {
+                    "source_job": job_id,
+                    "plan": job["result"]["plan"],
+                    "verify": False,
+                },
+            },
+        ).json()["job"]["id"]
+        done = _wait_job(client, edit_id)
+        assert done["state"] == "done", done.get("message")
+        assert done["result"]["report"]["core"]["detachable"]
+        assert "carrier_plate.stl" in done["parts"]
+
     def test_a_plain_mold_offers_no_core(self, client, part_bytes):
         mesh_id = client.post(
             "/api/meshes", files={"file": ("ball7.stl", part_bytes)}

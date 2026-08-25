@@ -46,6 +46,10 @@ class PipelineResult:
     # all, plus what was measured about it.
     core: trimesh.Trimesh | None = None
     core_report: dict = field(default_factory=dict)
+    # A fourth body, and only on a prosthesis run: a core that stays in the cast
+    # cannot be moulded into the plate, so the plate is printed on its own and
+    # bolted on.
+    plate: trimesh.Trimesh | None = None
     # The loose dowel pins, if any were bored for.
     pins: trimesh.Trimesh | None = None
     # The eroded body before the plan touched it. Cached rather than rebuilt:
@@ -82,6 +86,8 @@ class PipelineResult:
         if self.core is not None:
             out["core"] = self.core_report
             out["halves"]["core"] = meshio.mesh_stats(self.core)
+        if self.plate is not None:
+            out["halves"]["carrier_plate"] = meshio.mesh_stats(self.plate)
         return out
 
     def write(self, out_dir: str | Path, *, extras: bool = True) -> dict:
@@ -94,6 +100,10 @@ class PipelineResult:
         }
         if self.core is not None:
             written["core"] = str(meshio.export(self.core, out_dir / "core.stl"))
+        if self.plate is not None:
+            written["plate"] = str(
+                meshio.export(self.plate, out_dir / "carrier_plate.stl")
+            )
         if self.pins is not None:
             written["pins"] = str(meshio.export(self.pins, out_dir / "dowel_pins.stl"))
         if extras:
@@ -225,6 +235,10 @@ def run(
             core_report["release"] = core_mod.release_report(
                 core_mesh, half_a, half_b, d
             )
+        if core_mesh is not None and bodies.plate is not None:
+            core_report["detach"] = core_mod.detach_report(
+                core_mesh, bodies.plate, feat.pour_axis
+            )
         timings["verify"] = time.time() - t0
         if not separation.get("opens", False):
             log.error("mold halves do not separate: %s", separation)
@@ -242,6 +256,7 @@ def run(
         feature_plan=plan,
         core=core_mesh,
         core_report=core_report,
+        plate=bodies.plate,
         pins=pins,
         core_body=core_body,
         timings=timings,
@@ -260,6 +275,7 @@ class FeatureResult:
     separation: dict = field(default_factory=dict)
     core: trimesh.Trimesh | None = None
     core_report: dict = field(default_factory=dict)
+    plate: trimesh.Trimesh | None = None
     pins: trimesh.Trimesh | None = None
     timings: dict = field(default_factory=dict)
 
@@ -288,6 +304,8 @@ class FeatureResult:
         if self.core is not None:
             out["core"] = self.core_report
             out["halves"]["core"] = meshio.mesh_stats(self.core)
+        if self.plate is not None:
+            out["halves"]["carrier_plate"] = meshio.mesh_stats(self.plate)
         return out
 
     def write(self, out_dir: str | Path) -> dict:
@@ -299,6 +317,10 @@ class FeatureResult:
         }
         if self.core is not None:
             written["core"] = str(meshio.export(self.core, out_dir / "core.stl"))
+        if self.plate is not None:
+            written["plate"] = str(
+                meshio.export(self.plate, out_dir / "carrier_plate.stl")
+            )
         if self.pins is not None:
             written["pins"] = str(meshio.export(self.pins, out_dir / "dowel_pins.stl"))
         return written
@@ -350,6 +372,10 @@ def apply_feature_plan(
             core_report["release"] = core_mod.release_report(
                 core_mesh, half_a, half_b, ctx.direction
             )
+        if core_mesh is not None and bodies.plate is not None:
+            core_report["detach"] = core_mod.detach_report(
+                core_mesh, bodies.plate, feat.pour_axis
+            )
         timings["verify"] = time.time() - t0
         if not separation.get("opens", False):
             log.error("mold halves do not separate: %s", separation)
@@ -364,6 +390,7 @@ def apply_feature_plan(
         separation=separation,
         core=core_mesh,
         core_report=core_report,
+        plate=bodies.plate,
         pins=pins,
         timings=timings,
     )

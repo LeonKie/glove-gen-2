@@ -44,6 +44,38 @@ def full_config() -> MoldConfig:
     )
 
 
+def _prosthesis_config(**over) -> MoldConfig:
+    """The other mold type: a core that is left inside the cast.
+
+    The mount screws are sized down from the defaults because the taper's cut
+    face is a small circle -- a real forearm section takes three at full size,
+    and this fixture is about the joint, not about how much room it needs.
+    """
+    cfg = _core_config(carrier__enabled=True, core__mode="prosthesis", **over)
+    cfg.core_mount.count = 2
+    cfg.core_mount.radius = 1.5
+    cfg.core_mount.edge_margin = 1.0
+    cfg.core_mount.min_spacing = 4.0
+    cfg.core_mount.min_depth = 4.0
+    return cfg
+
+
+@pytest.fixture
+def prosthesis_config() -> MoldConfig:
+    return _prosthesis_config()
+
+
+@pytest.fixture(scope="module")
+def prosthesis(request):
+    """One prosthesis run shared by the assertions that only read it."""
+    return pipeline.run(
+        request.getfixturevalue("taper"),
+        _prosthesis_config(),
+        direction=[1, 0, 0],
+        verify=True,
+    )
+
+
 @pytest.fixture(scope="module")
 def built(request):
     """One full core run shared by the assertions that only read it."""
@@ -183,6 +215,157 @@ class TestThePlaneCut:
         assert dowels
         assert any(e["status"] == "applied" for e in dowels)
         assert not any("carrier plate" in e.get("reason", "") for e in dowels)
+
+
+class TestTheProsthesisMold:
+    """The second mold type: the core stays in the cast, so it has to let go.
+
+    A glove's core is moulded into the carrier plate and comes back out of the
+    cured cast with it. A prosthesis's core never comes out -- it *is* the
+    finished part's inner structure -- so the plate has to be a separate body it
+    can be unbolted from, which is what all of this is.
+    """
+
+    def test_the_plate_is_a_body_of_its_own(self, prosthesis):
+        assert prosthesis.plate is not None
+        assert prosthesis.plate.volume > 0
+        assert core.real_pieces(prosthesis.plate) == 1
+        # ...and the core is a body of its own too, not the two fused.
+        assert core.real_pieces(prosthesis.core) == 1
+
+    def test_a_glove_keeps_its_plate_inside_the_core(self, built):
+        """The default mold type is unchanged: one printed body, as before."""
+        assert built.plate is None
+        assert built.report()["core"]["mode"] == "glove"
+        assert not built.report()["core"]["detachable"]
+
+    def test_the_cut_leaves_the_core_flush_with_the_seat(self, prosthesis):
+        """A glove's core keeps a stub inside the plate; this one must not.
+
+        The stub is exactly what welds the two into one printed body, so a
+        detachable core is cut on the plane rather than a merge depth past it.
+        """
+        p = unit(prosthesis.feature_plan.pour_axis)
+        plane = prosthesis.core_report["plate"]["plane_offset_mm"]
+        top = float((np.asarray(prosthesis.core.vertices) @ p).max())
+        assert top == pytest.approx(plane, abs=0.05)
+
+    def test_the_plate_comes_off(self, prosthesis):
+        """Measured, because a plate that is still fused would look fine."""
+        detach = prosthesis.report()["core"]["detach"]
+        assert detach["detaches"]
+        assert detach["resting_overlap_mm3"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_core_is_bolted_to_it(self, prosthesis):
+        mounts = prosthesis.report()["core"]["core_screws"]
+        assert len(mounts) == 2  # the count this config asked for
+        for m in mounts:
+            # Blind in the core and right through the plate: a screw that only
+            # reaches one of the two joins nothing.
+            assert m["depth_mm"] >= 4.0
+            assert m["through_plate_mm"] > 0
+
+    def test_the_bolts_go_through_the_plate(self, prosthesis):
+        """The plate as cut, less a hole per screw -- and the port, and the rest."""
+        as_cut = prosthesis.report()["core"]["plate"]["volume_cm3"]
+        assert prosthesis.plate.volume / 1000.0 < as_cut
+
+    def test_the_bore_stops_inside_the_core(self, prosthesis):
+        """A bore that breaks out sideways opens into the cast."""
+        assert core.real_pieces(prosthesis.core) == 1
+        wall = prosthesis.report()["core"]["wall"]
+        assert wall["min_mm"] >= wall["target_mm"] * 0.9
+
+    def test_the_core_still_releases_and_the_halves_still_open(self, prosthesis):
+        assert prosthesis.report()["core"]["release"]["releases"]
+        assert prosthesis.separation["opens"]
+
+    def test_the_plate_is_written_beside_the_core(self, prosthesis, tmp_path):
+        written = prosthesis.write(tmp_path, extras=False)
+        assert (tmp_path / "carrier_plate.stl").exists()
+        assert (tmp_path / "core.stl").exists()
+        assert written["plate"].endswith("carrier_plate.stl")
+
+    def test_a_glove_core_refuses_to_be_unbolted(self, taper, full_config):
+        """There is nothing to unbolt: the plate is part of the core."""
+        first = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)
+        plan = first.feature_plan.as_dict()
+        plate = next(i for i in plan["items"] if i["kind"] == "plate")
+        plan["items"].append(
+            {
+                "id": "core_screw-x",
+                "kind": "core_screw",
+                "position": plate["position"],
+                "params": {},
+            }
+        )
+        out = pipeline.run(taper, full_config, direction=[1, 0, 0], plan=plan, verify=False)
+        entry = next(i for i in out.feature_report.items if i["kind"] == "core_screw")
+        assert entry["status"] == "skipped"
+        assert "moulded into its plate" in entry["reason"]
+
+    def test_a_mount_screw_needs_a_plate_to_go_through(self, taper, prosthesis_config):
+        first = pipeline.run(taper, prosthesis_config, direction=[1, 0, 0], verify=False)
+        plan = first.feature_plan.as_dict()
+        assert [i for i in plan["items"] if i["kind"] == "core_screw"]
+        for item in plan["items"]:
+            if item["kind"] == "plate":
+                item["enabled"] = False
+        out = pipeline.run(
+            taper, prosthesis_config, direction=[1, 0, 0], plan=plan, verify=False
+        )
+        mounts = [i for i in out.feature_report.items if i["kind"] == "core_screw"]
+        assert mounts
+        for entry in mounts:
+            assert entry["status"] == "skipped"
+            assert "carrier plate" in entry["reason"]
+
+    def test_a_bolt_off_the_core_is_skipped_with_a_reason(
+        self, taper, prosthesis_config
+    ):
+        """Out over the cast there is nothing for a screw to bite into."""
+        first = pipeline.run(taper, prosthesis_config, direction=[1, 0, 0], verify=False)
+        plan = first.feature_plan.as_dict()
+        moved = False
+        for item in plan["items"]:
+            if item["kind"] == "core_screw":
+                # Out at the block wall, well past the core's cut face.
+                item["position"] = [item["position"][0], 40.0, 40.0]
+                moved = True
+        assert moved
+        out = pipeline.run(
+            taper, prosthesis_config, direction=[1, 0, 0], plan=plan, verify=False
+        )
+        entry = next(i for i in out.feature_report.items if i["kind"] == "core_screw")
+        assert entry["status"] == "skipped"
+        assert "of core under this point" in entry["reason"]
+
+    def test_a_glove_mold_proposes_no_mount_screws(self, taper, full_config):
+        built = pipeline.run(taper, full_config, direction=[1, 0, 0], verify=False)
+        assert not [i for i in built.feature_plan.items if i.kind == "core_screw"]
+
+
+class TestBlindDepth:
+    """How far a bore can go before it leaves the body it is bored into."""
+
+    def test_it_runs_the_full_limit_down_the_middle(self):
+        rod = trimesh.creation.cylinder(radius=8.0, height=40.0, sections=48)
+        depth = core.blind_depth(rod, [0.0, 0.0, 20.0], [0, 0, -1], 30.0, 2.0)
+        assert depth == pytest.approx(30.0)
+
+    def test_it_stops_at_the_far_end(self):
+        rod = trimesh.creation.cylinder(radius=8.0, height=40.0, sections=48)
+        depth = core.blind_depth(rod, [0.0, 0.0, 20.0], [0, 0, -1], 60.0, 2.0)
+        assert 38.0 <= depth <= 40.0
+
+    def test_a_bore_that_grazes_the_wall_is_not_inside(self):
+        """The ring is the point: an axis ray down this line never leaves."""
+        rod = trimesh.creation.cylinder(radius=8.0, height=40.0, sections=48)
+        assert core.blind_depth(rod, [7.5, 0.0, 20.0], [0, 0, -1], 30.0, 2.0) == 0.0
+
+    def test_nothing_there_is_no_depth(self):
+        rod = trimesh.creation.cylinder(radius=8.0, height=40.0, sections=48)
+        assert core.blind_depth(rod, [40.0, 0.0, 20.0], [0, 0, -1], 30.0, 2.0) == 0.0
 
 
 class TestThePourPath:
@@ -439,6 +622,21 @@ class TestConfig:
         cfg.core.enabled = True
         cfg.core.wall = 3.25
         assert MoldConfig.from_dict(cfg.to_dict()).core.wall == 3.25
+
+    def test_the_mold_type_defaults_to_a_glove_and_round_trips(self):
+        assert not MoldConfig().core.detachable
+        cfg = MoldConfig.from_dict(
+            {"core": {"mode": "prosthesis"}, "core_mount": {"count": 5}}
+        )
+        assert cfg.core.detachable
+        assert cfg.core_mount.count == 5
+        assert MoldConfig.from_dict(cfg.to_dict()).core.mode == "prosthesis"
+
+    def test_an_unknown_mold_type_is_refused(self):
+        """Quietly building the *other* type is not something you find out
+        about until the cast has cured around a core meant to come back out."""
+        with pytest.raises(ValueError, match="core.mode must be one of"):
+            MoldConfig.from_dict({"core": {"mode": "prosthetic"}})
 
 
 class TestPourAxisSeededFrame:

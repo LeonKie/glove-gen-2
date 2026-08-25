@@ -195,6 +195,10 @@ def _do_mold(store: Store, job: dict) -> dict:
         previews["core"] = _write_preview(
             result.core, out_dir / "core.bin", PREVIEW_FACES
         )
+    if result.plate is not None:
+        previews["plate"] = _write_preview(
+            result.plate, out_dir / "plate.bin", PREVIEW_FACES
+        )
     surface = result.mold_result.surface.surface_mesh()
     (out_dir / "parting.bin").write_bytes(
         viewer_format.encode(meshio.decimate(surface, PREVIEW_FACES))
@@ -349,6 +353,10 @@ def _do_features(store: Store, job: dict) -> dict:
         previews["core"] = _write_preview(
             result.core, out_dir / "core.bin", PREVIEW_FACES
         )
+    if result.plate is not None:
+        previews["plate"] = _write_preview(
+            result.plate, out_dir / "plate.bin", PREVIEW_FACES
+        )
 
     report_data = result.report()
     report_data["base_job"] = base_job
@@ -379,8 +387,13 @@ def _parts_manifest(out_dir: Path, written: dict) -> dict:
             "bytes": (out_dir / "report.json").stat().st_size,
         },
     }
+    # A glove's core is printed with the plate moulded into it; a prosthesis's
+    # core is left in the cast, so the plate is a part of its own and the core
+    # is labelled as the thing that bolts to it.
+    detached = (out_dir / "carrier_plate.stl").exists()
     for extra, label in (
-        ("core.stl", "Core, carrier plate and all"),
+        ("core.stl", "Core (bolts to the plate)" if detached else "Core, carrier plate and all"),
+        ("carrier_plate.stl", "Carrier plate (unbolts, leaving the core in the cast)"),
         ("dowel_pins.stl", "Dowel pins (or use rod of the same diameter)"),
         ("parting_surface.stl", "Parting surface"),
         ("mold_uncut.stl", "Mold before splitting"),

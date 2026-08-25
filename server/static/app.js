@@ -18,6 +18,7 @@ const el = {
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
   optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
   optCore: $('opt-core'), coreOptions: $('core-options'),
+  coreMode: $('core-mode'), coreModeHint: $('core-mode-hint'),
   coreWall: $('core-wall'), coreWallVal: $('core-wall-val'),
   optCarrier: $('opt-carrier'), optTabs: $('opt-tabs'), optDowels: $('opt-dowels'),
   coreTabs: $('core-tabs'), coreTabsVal: $('core-tabs-val'), rowCoreTabs: $('row-core-tabs'),
@@ -40,6 +41,7 @@ const state = {
   heatTimer: null,
   layer: 'part',
   lastReport: null,
+  coreMode: null,       // "glove" or "prosthesis", from the last report
   // feature editing
   plan: null,           // the plan being edited
   autoPlan: null,       // what the mold job proposed, for "Reset"
@@ -86,7 +88,9 @@ const fill = new THREE.DirectionalLight(0xa8c4e0, 0.6);
 fill.position.set(-1.1, 0.9, -0.6);
 scene.add(fill);
 
-const layers = { part: null, half_a: null, half_b: null, parting: null, core: null };
+const layers = {
+  part: null, half_a: null, half_b: null, parting: null, core: null, plate: null,
+};
 const gizmo = new THREE.Group();
 scene.add(gizmo);
 // Where the knobs and holes are, drawn over whichever layer is showing.
@@ -250,7 +254,7 @@ async function selectMesh(meshId) {
   setLayer('part', buildGeometry(decodeGGM2(buf)));
   frameModel(layers.part.geometry.boundingSphere);
 
-  ['half_a', 'half_b', 'parting', 'core'].forEach((k) => disposeLayer(k));
+  ['half_a', 'half_b', 'parting', 'core', 'plate'].forEach((k) => disposeLayer(k));
   el.layers.querySelectorAll('button').forEach((b) => {
     b.disabled = b.dataset.layer !== 'part';
   });
@@ -459,6 +463,13 @@ const PARAM_UI = {
     { name: 'depth', label: 'depth', unit: 'mm', min: 2, max: 60, step: 0.5 },
     { name: 'clearance', label: 'fit', unit: 'mm', min: 0, max: 3, step: 0.05 },
   ],
+  core_screw: [
+    { name: 'radius', label: 'pilot r', unit: 'mm', min: 0.5, max: 10, step: 0.1 },
+    { name: 'depth', label: 'depth', unit: 'mm', min: 2, max: 60, step: 0.5 },
+    { name: 'clearance', label: 'fit', unit: 'mm', min: 0, max: 3, step: 0.05 },
+    { name: 'head_radius', label: 'head r', unit: 'mm', min: 0.5, max: 20, step: 0.1 },
+    { name: 'head_depth', label: 'head', unit: 'mm', min: 0, max: 20, step: 0.5 },
+  ],
   port: [
     { name: 'inner_radius', label: 'inner r', unit: 'mm', min: 0.5, max: 30, step: 0.5 },
     { name: 'outer_radius', label: 'outer r', unit: 'mm', min: 1, max: 60, step: 0.5 },
@@ -466,21 +477,24 @@ const PARAM_UI = {
 };
 // Mirrors features.KINDS: the plate leads because it is the plane cut, and
 // everything in the core group after it stands on the face that cut leaves.
-const KIND_ORDER = ['plate', 'key', 'spout', 'vent', 'core_tab', 'dowel', 'screw', 'port'];
-const CORE_KINDS = new Set(['plate', 'core_tab', 'dowel', 'screw', 'port']);
+const KIND_ORDER = [
+  'plate', 'key', 'spout', 'vent', 'core_tab', 'dowel', 'screw', 'core_screw', 'port',
+];
+const CORE_KINDS = new Set(['plate', 'core_tab', 'dowel', 'screw', 'core_screw', 'port']);
 const KIND_LABEL = {
   key: 'Knob', spout: 'Spout', vent: 'Vent',
   plate: 'Plate', core_tab: 'Tab', dowel: 'Dowel', screw: 'Screw', port: 'Port',
+  core_screw: 'Bolt',
 };
 const KIND_PLURAL = {
   key: 'Knobs', spout: 'Spouts', vent: 'Vents',
   plate: 'Carrier plate', core_tab: 'Seam tabs', dowel: 'Seam dowels',
-  screw: 'Plate screws', port: 'Pour port',
+  screw: 'Plate screws', port: 'Pour port', core_screw: 'Core mount screws',
 };
 const KIND_COLOUR = {
   key: 0x52a8ff, spout: 0x46b07a, vent: 0xe0a23c,
   plate: 0xb07ad6, core_tab: 0x3fc4c4, dowel: 0xff8a5c, screw: 0x9aa7b6,
-  port: 0x6fd08c,
+  port: 0x6fd08c, core_screw: 0xd9d05a,
 };
 
 const label1 = (kind) => KIND_LABEL[kind] || kind;
@@ -526,6 +540,13 @@ function defaultParams(kind) {
     return {
       radius: c.screw_radius ?? 2, depth: c.screw_depth ?? 14,
       clearance: c.screw_clearance ?? 0.4,
+    };
+  }
+  if (kind === 'core_screw') {
+    const m = d.core_mount || {};
+    return {
+      radius: m.radius ?? 2, depth: m.depth ?? 12, clearance: m.clearance ?? 0.4,
+      head_radius: m.head_radius ?? 4, head_depth: m.head_depth ?? 3,
     };
   }
   if (kind === 'port') {
@@ -713,7 +734,7 @@ function cutPlane() {
 // Everything that hangs off the plate lives on the plate's plane. The cut
 // decides how far along the pour axis they sit; a click only ever chooses
 // where *across* it they go.
-const ON_PLANE = new Set(['screw', 'port']);
+const ON_PLANE = new Set(['screw', 'core_screw', 'port']);
 
 /** Slide the items that belong on the cut onto it.
  *
@@ -800,19 +821,33 @@ const GROUP_NOTE = {
   screw: 'Clamps the plate down, because a core floats rather than sinks. Each '
     + 'has to land wholly inside one half: on the seam it would jack the halves '
     + 'apart instead of holding them shut.',
+  core_screw: 'What makes a prosthesis mold a prosthesis mold: the core is left '
+    + 'inside the cured cast, so it is bolted to the plate rather than moulded '
+    + 'into it. Back these out and the plate leaves with the mold, the core with '
+    + 'the cast. Each bores blind into the core\u2019s cut face, a margin inside '
+    + 'its edge, because a bore that breaks out sideways opens into the cast.',
   port: 'The way in once the plate seals the cast: a funnel through it down to '
     + 'the ring of glove at the cut. Only a wall thick, so it necks down.',
 };
 
 /** Something true about the group as a whole that a row cannot say.
  *
- *  A plate with no dowels is the case worth catching: it caps the mold and
- *  seals the cast in, and it will look perfectly finished, but nothing locates
- *  it — which is the entire reason for having one.
+ *  Both cases are the same shape: a mold that will look perfectly finished
+ *  while the one thing the group exists for is missing. A plate with no dowels
+ *  caps the mold and seals the cast in, but nothing locates the core inside it;
+ *  a core that stays in the cast with no mount screws is bolted to nothing.
  */
 function groupWarning(kind) {
-  if (kind !== 'plate') return '';
   const on = (k) => itemsOfKind(k).some((i) => i.enabled);
+  // A prosthesis core is left inside the cast, so the screws are the only thing
+  // it can be held by and the only way it ever lets go of the plate.
+  if (kind === 'core_screw') {
+    if (state.coreMode !== 'prosthesis' || on('core_screw')) return '';
+    return `<p class="grp-warn">This core is left inside the cast, so it has to
+      bolt to the plate — and nothing bolts it. Add mount screws below, or
+      build again with a plate for them to go through.</p>`;
+  }
+  if (kind !== 'plate') return '';
   if (!on('plate') || on('dowel') || on('core_tab')) return '';
   return `<p class="grp-warn">The plate closes the mold, but nothing holds the
     core still inside it — so the wall ends up whatever thickness the core
@@ -840,7 +875,7 @@ function groupHtml(kind) {
     </div>`;
   const note = GROUP_NOTE[kind] ? `<p class="grp-note">${esc(GROUP_NOTE[kind])}</p>` : '';
   if (!items.length) {
-    return `<div class="grp">${head}${note}` +
+    return `<div class="grp">${head}${note}${groupWarning(kind)}` +
       '<p class="empty">none — “+ add” places one by hand</p></div>';
   }
   return `
@@ -1018,7 +1053,7 @@ function selectItem(id, { reveal = false } = {}) {
 const PLACE_ON = {
   key: 'parting', spout: 'parting', vent: 'part',
   plate: 'part', core_tab: 'parting', dowel: 'parting',
-  screw: 'core', port: 'core',
+  screw: 'core', port: 'core', core_screw: 'core',
 };
 const PLACE_HINT = {
   key: 'Click the parting surface to drop a knob · Esc to cancel',
@@ -1029,6 +1064,7 @@ const PLACE_HINT = {
   dowel: 'Click the parting surface where the pin should cross it · Esc to cancel',
   screw: 'Click the plate, clear of the seam · Esc to cancel',
   port: 'Click the plate over the ring of cast · Esc to cancel',
+  core_screw: 'Click the core\u2019s cut face, in from its edge · Esc to cancel',
 };
 const MOVE_HINT = {
   key: 'Click the parting surface to move this knob · Esc to cancel',
@@ -1039,6 +1075,7 @@ const MOVE_HINT = {
   dowel: 'Click the parting surface to move this pin · Esc to cancel',
   screw: 'Click the plate to move this screw · Esc to cancel',
   port: 'Click the plate to move the port · Esc to cancel',
+  core_screw: 'Click the core\u2019s cut face to move this bolt · Esc to cancel',
 };
 
 function setPlacing(kind, moveId = null) {
@@ -1191,8 +1228,9 @@ function drawMarkers() {
       geom = new THREE.CylinderGeometry(reach, reach, Math.max(p.thickness, 1), 40);
       axis = pour;
       offset = Math.max(p.thickness, 1) / 2;
-    } else if (item.kind === 'screw') {
+    } else if (item.kind === 'screw' || item.kind === 'core_screw') {
       // Screws go *down* from the plate into the mold, so the marker does too.
+      // A mount screw is the same shape aimed at the core instead of a half.
       geom = new THREE.CylinderGeometry(p.radius, p.radius, Math.max(p.depth, 1), 18);
       axis = pour;
       offset = -Math.max(p.depth, 1) / 2;
@@ -1344,7 +1382,11 @@ function moldConfig() {
     keys: { enabled: el.optKeys.checked },
     spout: { enabled: el.optSpout.checked },
     vents: { enabled: el.optVents.checked },
-    core: { enabled: el.optCore.checked, wall: Number(el.coreWall.value) },
+    core: {
+      enabled: el.optCore.checked,
+      wall: Number(el.coreWall.value),
+      mode: el.coreMode.value,
+    },
     carrier: { enabled: el.optCarrier.checked },
     core_dowels: { enabled: el.optDowels.checked },
     core_tabs: { enabled: el.optTabs.checked, count: Number(el.coreTabs.value) },
@@ -1430,6 +1472,7 @@ el.build.onclick = async () => {
 async function showResult(job) {
   const r = job.result.report;
   state.lastReport = r;
+  state.coreMode = r.core?.mode || null;
   const sep = r.separation || {};
   const feat = r.features || {};
 
@@ -1475,11 +1518,17 @@ async function showResult(job) {
   statsTable(el.resultStats, rows);
 
   const hasCore = Boolean(r.core);
+  // Only a prosthesis run has a plate of its own; a glove's is inside the core.
+  const hasPlate = Boolean(r.halves?.carrier_plate);
   if (!hasCore) {
     // Loading a plain job from history after a core one must not leave the
     // previous core on screen as if it belonged to this mold.
     disposeLayer('core');
     el.layers.querySelector('[data-layer="core"]').disabled = true;
+  }
+  if (!hasPlate) {
+    disposeLayer('plate');
+    el.layers.querySelector('[data-layer="plate"]').disabled = true;
   }
 
   el.downloads.innerHTML = Object.entries(job.parts || {})
@@ -1494,6 +1543,7 @@ async function showResult(job) {
   // the console on every ordinary build for someone to chase later.
   const previews = ['half_a', 'half_b', 'parting'];
   if (hasCore) previews.push('core');
+  if (hasPlate) previews.push('plate');
   for (const which of previews) {
     try {
       const res = await fetch(`/api/jobs/${job.id}/preview/${which}.bin`);
@@ -1513,6 +1563,9 @@ async function showResult(job) {
 function coreRows(core) {
   if (!core) return [];
   const rows = [];
+  if (core.mode === 'prosthesis') {
+    rows.push(['mold type', 'prosthesis — the core stays in the cast']);
+  }
   const wall = core.wall;
   if (wall?.median_mm != null) {
     const thin = wall.under_90pct_fraction > 0.001;
@@ -1536,6 +1589,16 @@ function coreRows(core) {
       ['plate', `${core.plate.thickness_mm.toFixed(1)} mm · ${screws} screws`],
     );
   }
+  if (core.detachable) {
+    // The one thing a prosthesis mold has to be able to do, and the one thing
+    // that would silently not work: a plate still moulded into its core.
+    const mounts = (core.core_screws || []).length;
+    rows.push(['core bolts on with', mounts ? `${mounts} screws` : 'nothing', mounts ? 'ok' : 'bad']);
+    if (core.detach) {
+      rows.push(['plate comes off', core.detach.detaches ? 'yes' : 'NO',
+        core.detach.detaches ? 'ok' : 'bad']);
+    }
+  }
   if (core.pieces > 1) {
     // A bore across the root of a tab does not weaken it, it cuts it off.
     rows.push(['core is in pieces', `${core.pieces} — a bore has severed something`, 'bad']);
@@ -1548,9 +1611,13 @@ function coreRows(core) {
   const tabs = (core.core_tabs || []).length;
   if (tabs) {
     rows.push(['seam tabs', tabs]);
-    // The one cost of a tab, and the number that decides whether a given cast
-    // material tolerates it or tears on it.
-    rows.push(['cast stretches over', `${(core.tab_through_wall_mm3 ?? 0).toFixed(0)} mm³`, 'warn']);
+    // The one cost of a tab. On a glove the cast stretches off it on the way
+    // out; on a prosthesis the core never leaves, so the tab is simply still
+    // there, sticking out through the finished wall.
+    rows.push([
+      core.detachable ? 'tab left in the cast' : 'cast stretches over',
+      `${(core.tab_through_wall_mm3 ?? 0).toFixed(0)} mm³`, 'warn',
+    ]);
   }
   return rows;
 }
@@ -1610,6 +1677,13 @@ el.coreWall.addEventListener('input', () => {
 });
 el.coreTabs.addEventListener('input', () => { el.coreTabsVal.textContent = el.coreTabs.value; });
 el.optCore.addEventListener('change', () => { el.coreOptions.hidden = !el.optCore.checked; });
+el.coreMode.addEventListener('change', () => {
+  const prosthesis = el.coreMode.value === 'prosthesis';
+  el.coreModeHint.hidden = !prosthesis;
+  // The core bolts to the plate, so there has to be a plate to bolt it to.
+  if (prosthesis) el.optCarrier.checked = true;
+  el.optCarrier.disabled = prosthesis;
+});
 el.optTabs.addEventListener('change', () => { el.rowCoreTabs.hidden = !el.optTabs.checked; });
 
 el.layers.querySelectorAll('button').forEach((b) => {

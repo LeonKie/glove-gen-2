@@ -84,6 +84,20 @@
         </p>
         <div id="core-options" hidden>
           <div class="row">
+            <label for="core-mode">Mold type</label>
+            <select id="core-mode">
+              <option value="glove" selected>Glove — the core comes back out</option>
+              <option value="prosthesis">Prosthesis — the core stays in the cast</option>
+            </select>
+          </div>
+          <p class="hint" id="core-mode-hint" hidden>
+            The core is left inside the cured silicone for good, so it cannot be
+            moulded into the carrier plate: it is printed on its own and
+            <b>bolted</b> to it. Back the screws out and the plate leaves with
+            the mold, the core with the cast. A plate is what it bolts to, so
+            one is always proposed.
+          </p>
+          <div class="row">
             <label for="core-wall">Glove wall <span class="val" id="core-wall-val">2.5 mm</span></label>
             <input type="range" id="core-wall" min="0.8" max="8" step="0.1" value="2.5">
           </div>
@@ -159,6 +173,7 @@
       <button data-layer="half_b" disabled>Half B</button>
       <button data-layer="parting" disabled>Parting</button>
       <button data-layer="core" disabled>Core</button>
+      <button data-layer="plate" disabled>Plate</button>
     </div>
     <div id="legend" hidden>
       <span class="swatch ok"></span> releases

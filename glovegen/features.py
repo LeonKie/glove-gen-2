@@ -138,17 +138,19 @@ def _difference(a, b, label="difference"):
 # The order items are cut in, and so the order they are listed in. ``plate``
 # leads because it is the plane cut: it decides how much mold there is at all,
 # and every core item after it stands on the face it leaves.
-KINDS = ("plate", "key", "spout", "vent", "core_tab", "dowel", "screw", "port")
+KINDS = (
+    "plate", "key", "spout", "vent", "core_tab", "dowel", "screw", "core_screw", "port"
+)
 
 # Kinds that only mean anything when a core was built. They are proposed only
 # for a core run and skipped with a reason otherwise, rather than quietly
 # dropped, so an edited plan carried over from a plain mold explains itself.
-CORE_KINDS = ("plate", "core_tab", "dowel", "screw", "port")
+CORE_KINDS = ("plate", "core_tab", "dowel", "screw", "core_screw", "port")
 
 # ...and of those, the ones that only mean anything once a plate has cut the
 # mold. A dowel is not one of them: it locks the core to the halves and needs
 # no plate at all, which is the whole difference between it and a screw.
-PLATE_KINDS = ("screw", "port")
+PLATE_KINDS = ("screw", "core_screw", "port")
 
 # Sizes a caller may set per item, with the range each is clamped to. The
 # bounds are sanity rails, not opinions: they keep a stray unit (metres for
@@ -172,6 +174,13 @@ PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
         "clearance": (0.0, 2.0),
     },
     "screw": {"radius": (0.5, 10.0), "depth": (2.0, 60.0), "clearance": (0.0, 3.0)},
+    "core_screw": {
+        "radius": (0.5, 10.0),
+        "depth": (2.0, 60.0),
+        "clearance": (0.0, 3.0),
+        "head_radius": (0.5, 20.0),
+        "head_depth": (0.0, 20.0),
+    },
     "port": {"inner_radius": (0.5, 30.0), "outer_radius": (1.0, 60.0)},
 }
 
@@ -213,6 +222,15 @@ def _defaults_for(kind: str, cfg: MoldConfig | None = None) -> dict[str, float]:
             "radius": c.screw_radius,
             "depth": c.screw_depth,
             "clearance": c.screw_clearance,
+        }
+    if kind == "core_screw":
+        m = cfg.core_mount
+        return {
+            "radius": m.radius,
+            "depth": m.depth,
+            "clearance": m.clearance,
+            "head_radius": m.head_radius,
+            "head_depth": m.head_depth,
         }
     if kind == "port":
         c = cfg.carrier
@@ -854,6 +872,10 @@ class Bodies:
     half_a: trimesh.Trimesh
     half_b: trimesh.Trimesh
     core: trimesh.Trimesh | None = None
+    # A fourth body, and only on a prosthesis run: there the core is left in the
+    # cast, so it cannot be moulded into the plate and the plate is printed on
+    # its own. On a glove run it is part of ``core`` and this is None.
+    plate: trimesh.Trimesh | None = None
     # The dowel pins, fused into one mesh. Deliberately outside the iteration
     # below: they are not a body of the mold but loose hardware, and a length
     # of the right rod does the job just as well as a printed one.
@@ -989,13 +1011,21 @@ def plan_features(
             port = core_mod.find_port_site(ctx, state)
             if port is not None:
                 add("port", port, "over the ring of cast at the cut face")
+            keep_clear = [port] if port is not None else []
             for n, point in enumerate(
-                core_mod.find_screw_sites(
-                    ctx, state, cfg, [port] if port is not None else []
-                ),
+                core_mod.find_screw_sites(ctx, state, cfg, keep_clear),
                 start=1,
             ):
                 add("screw", point, "clamps the plate down", n)
+            # Only a core that is *left in the cast* needs to be able to let go
+            # of the plate. A glove's core is moulded into it and comes out with
+            # it, so it is bolted to nothing.
+            if state.detachable:
+                for n, point in enumerate(
+                    core_mod.find_core_screw_sites(ctx, state, cfg, keep_clear),
+                    start=1,
+                ):
+                    add("core_screw", point, "unbolts the core from the plate", n)
 
     plan = FeaturePlan(items=items, pour_axis=[float(v) for v in pour_axis])
     log.info(
@@ -1019,8 +1049,17 @@ def _stage_core(ctx: FeatureContext, pour_axis, cfg: MoldConfig):
         return None
     from . import core as core_mod
 
-    state = core_mod.CoreState(body=ctx.core, axis=unit(pour_axis))
+    state = core_mod.CoreState(
+        body=ctx.core, axis=unit(pour_axis), detachable=cfg.core.detachable
+    )
     if not cfg.carrier.enabled:
+        if cfg.core.detachable:
+            # The plate is the only thing a detachable core has to bolt to, and
+            # the plane cut is the only thing that opens the cast at all.
+            log.warning(
+                "this core is meant to stay in the cast, but the mold has no "
+                "carrier plate for it to bolt to"
+            )
         return state
     try:
         core_mod.stage_plate(
@@ -1088,7 +1127,11 @@ def apply_plan(
 
     bodies = Bodies(half_a=half_a, half_b=half_b)
     state = (
-        core_mod.CoreState(body=ctx.core, axis=pour_axis) if ctx.core is not None else None
+        core_mod.CoreState(
+            body=ctx.core, axis=pour_axis, detachable=cfg.core.detachable
+        )
+        if ctx.core is not None
+        else None
     )
 
     out = FeatureReport(pour_axis=[round(float(v), 4) for v in pour_axis])
@@ -1130,6 +1173,8 @@ def apply_plan(
                 detail = core_mod.apply_dowel(bodies, ctx, item, state, cfg)
             elif item.kind == "screw":
                 detail = core_mod.apply_screw(bodies, ctx, item, state, cfg)
+            elif item.kind == "core_screw":
+                detail = core_mod.apply_core_screw(bodies, ctx, item, state, cfg)
             else:
                 detail = core_mod.apply_port(bodies, ctx, item, state, cfg)
         except FeatureSkipped as exc:
@@ -1147,6 +1192,7 @@ def apply_plan(
     if state is not None:
         report_progress(0.95, "fusing the core assembly")
         bodies.core = state.assembly()
+        bodies.plate = state.plate_body()
         bodies.pins = state.pin_stock()
         out.core = _core_summary(state, ctx, cfg, details, bodies.core)
 
@@ -1165,6 +1211,10 @@ def _core_summary(state, ctx, cfg: MoldConfig, details: dict, assembly) -> dict:
 
     cut = None if state.plane is None else state.plane - cfg.core.wall
     return {
+        # Which of the two mold types this is, and so what becomes of the core:
+        # pulled back out of the cast with the plate, or left inside it.
+        "mode": cfg.core.mode,
+        "detachable": bool(state.detachable),
         "wall": core_mod.measure_wall(
             state.wall_body if state.wall_body is not None else state.body,
             ctx.cavity,

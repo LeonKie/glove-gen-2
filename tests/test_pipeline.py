@@ -294,6 +294,40 @@ class TestCLI:
         assert report["features"]["keys"]["height_mm"] == 6.0
         assert report["features"]["spout"]["outer_radius_mm"] == 12.0
 
+    def test_prosthesis_writes_the_plate_as_its_own_part(self, taper, tmp_path, capsys):
+        """--prosthesis implies a plate, because that is what the core bolts to."""
+        path = tmp_path / "part.stl"
+        taper.export(str(path))
+        out = tmp_path / "out_prosthesis"
+        code = cli.main([
+            "-q", "mold", str(path), "-o", str(out), "--direction", "1", "0", "0",
+            "--margin", "10", "--grid", "70", "--no-vents", "--no-verify",
+            "--wall", "2", "--core-faces", "6000", "--prosthesis",
+            "--mount-screws", "2", "--mount-radius", "1.5",
+        ])
+        assert code == 0
+        assert (out / "core.stl").exists()
+        assert (out / "carrier_plate.stl").exists()
+        report = json.loads((out / "report.json").read_text())
+        assert report["core"]["mode"] == "prosthesis"
+        assert report["core"]["plate"] is not None
+        assert report["written"]["plate"].endswith("carrier_plate.stl")
+
+    def test_a_glove_keeps_the_plate_inside_the_core(self, taper, tmp_path, capsys):
+        path = tmp_path / "part.stl"
+        taper.export(str(path))
+        out = tmp_path / "out_glove"
+        code = cli.main([
+            "-q", "mold", str(path), "-o", str(out), "--direction", "1", "0", "0",
+            "--margin", "10", "--grid", "70", "--no-vents", "--no-verify",
+            "--wall", "2", "--core-faces", "6000", "--plate",
+        ])
+        assert code == 0
+        assert (out / "core.stl").exists()
+        assert not (out / "carrier_plate.stl").exists()
+        report = json.loads((out / "report.json").read_text())
+        assert report["core"]["mode"] == "glove"
+
     def test_a_saved_plan_can_be_applied_back(self, taper, tmp_path, capsys):
         """The command line stays automatic, but an edited plan overrides it."""
         path = tmp_path / "part.stl"

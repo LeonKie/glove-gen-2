@@ -217,6 +217,13 @@ select {
 .grp-head .dot.key { background: #52a8ff; }
 .grp-head .dot.spout { background: var(--ok); }
 .grp-head .dot.vent { background: var(--warn); }
+/* the core group, in the colours the viewport draws their markers in */
+.grp-head .dot.plate { background: #b07ad6; }
+.grp-head .dot.core_tab { background: #3fc4c4; }
+.grp-head .dot.dowel { background: #ff8a5c; }
+.grp-head .dot.screw { background: #9aa7b6; }
+.grp-head .dot.core_screw { background: #d9d05a; }
+.grp-head .dot.port { background: #6fd08c; }
 .grp-head .grp-name { font-size: 12px; font-weight: 600; }
 .grp-head .count { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
 .grp-head .add { margin-left: auto; }

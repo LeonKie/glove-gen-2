@@ -25,6 +25,25 @@ two become one printed body. The glove's rim is exactly the cut.
 
 Screws hold the plate down, because the load is uplift.
 
+Two mold types, and what the core does after the pour
+-----------------------------------------------------
+The plate description above is the ``glove`` type: the core is moulded into the
+plate as one printed body, and pulling the plate pulls the core back out of the
+cured cast. What is left is a hollow glove.
+
+The ``prosthesis`` type wants the opposite. The core stays inside the silicone
+for good -- it *is* the finished part's inner structure -- so the one thing it
+has to be able to do is let go of the plate. A stub moulded into the plate
+cannot; a bolted joint can. So in that mode the plane cuts the core flush
+instead of leaving a stub, the plate is a printed body of its own, and
+``core_screw`` items run down the pour axis through the plate into the core's
+cut face. Back the screws out and the plate leaves with the mold, the core with
+the cast.
+
+Everything else -- the plane cut, the port, the clamping screws, the dowels --
+is the same in both. The mode decides one boolean: whether the plate is fused
+into the core assembly or handed back beside it.
+
 Sealing the annulus means the pour has to come through the plate, which is what
 the port is: a funnel down to the ring of cast at the cut face. With a plate in
 the plan the ordinary spout is redundant, and is reported as such rather than
@@ -393,6 +412,10 @@ class CoreState:
 
     body: trimesh.Trimesh  # the eroded core, trimmed once the plate cuts it
     axis: np.ndarray  # the pour axis, and so the cut plane's normal
+    # Does the core unbolt from the plate rather than being moulded into it?
+    # A prosthesis leaves its core inside the cured cast, so the two have to be
+    # separate printed bodies; a glove's core comes back out with the plate.
+    detachable: bool = False
     pieces: list = field(default_factory=list)  # unioned into the assembly
     holes: list = field(default_factory=list)  # subtracted from it afterwards
     plane: float | None = None  # cut offset along the axis
@@ -461,7 +484,13 @@ class CoreState:
         )
 
     def assembly(self) -> trimesh.Trimesh:
-        """Fuse everything into the one body that gets printed."""
+        """Fuse everything into the one body that gets printed.
+
+        On a glove run that is core, plate and tabs together. On a prosthesis
+        run the plate is not in ``pieces`` -- it is a body of its own, because
+        the core has to be able to let go of it -- so this is the core and its
+        tabs, with every bore cut out of it.
+        """
         parts = [self.body] + self.pieces
         out = (
             parts[0]
@@ -471,6 +500,23 @@ class CoreState:
         for hole in self.holes:
             out = cut(out, hole, "core hole")
         return assert_core_solid(out, "core assembly")
+
+    def plate_body(self) -> trimesh.Trimesh | None:
+        """The carrier plate as its own printable part, or nothing if it is fused.
+
+        The same bores go through it as through the assembly, which is what a
+        fused plate got by being part of that assembly: the port funnel, the
+        clamping screws' clearance holes, and the mount screws that hold the
+        core on. Cutting the whole list rather than a plate-only subset is
+        deliberate -- it is exactly what fusing them did -- and a tool that
+        never reaches the plate simply takes nothing off it.
+        """
+        if not self.detachable or self.plate is None:
+            return None
+        out = self.plate
+        for hole in self.holes:
+            out = cut(out, hole, "plate hole")
+        return assert_core_solid(out, "carrier plate")
 
 
 def cut(solid: trimesh.Trimesh, tool: trimesh.Trimesh, label: str) -> trimesh.Trimesh:
@@ -493,11 +539,16 @@ def stage_plate(ctx, point, thickness: float, state: CoreState) -> None:
     block is about to be discarded is a dowel nobody can use -- so this is
     separated from applying it and runs during the planning pass too.
 
-    The core is trimmed a merge depth *above* the plane rather than at it. The
-    stub that leaves sticking up ends up inside the plate, which turns the union
-    of core and plate from a coplanar boolean into an overlapping one -- and the
-    space it occupies is space the halves are about to vacate, so nothing can
-    foul on it.
+    On a glove run the core is trimmed a merge depth *above* the plane rather
+    than at it. The stub that leaves sticking up ends up inside the plate, which
+    turns the union of core and plate from a coplanar boolean into an
+    overlapping one -- and the space it occupies is space the halves are about
+    to vacate, so nothing can foul on it.
+
+    A detachable core is cut flush on the plane instead. The stub is precisely
+    what welds the two into one body, and a prosthesis needs them to be two: the
+    flat face it leaves is the seat the plate bolts down onto, and the plate has
+    to be able to lift straight off it.
     """
     if ctx.block is None:
         raise FeatureSkipped(
@@ -522,8 +573,9 @@ def stage_plate(ctx, point, thickness: float, state: CoreState) -> None:
     if len(plate.faces) == 0 or plate.volume <= 0:
         raise FeatureSkipped("the block has no material at the cut plane")
 
+    stub = 0.0 if state.detachable else _MERGE_MM
     body = cut(
-        state.body, _slab(frame, span, offset + _MERGE_MM, hi + _OVERHANG_MM), "plane -> core"
+        state.body, _slab(frame, span, offset + stub, hi + _OVERHANG_MM), "plane -> core"
     )
     if len(body.faces) == 0:
         raise FeatureSkipped("the cut plane leaves no core behind it")
@@ -542,8 +594,13 @@ def apply_plate(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
 
     Everything past the plane goes: half A, half B and the core alike. What is
     left is three coplanar faces, and the plate is a slab of the block's own
-    section laid across all of them, so it caps the halves, seals the annulus
-    and swallows the core's stub in one body.
+    section laid across all of them, so it caps the halves and seals the
+    annulus.
+
+    On a glove run it also swallows the core's stub, and the two come out as one
+    printed body. On a prosthesis run it does not: the core is left in the cast,
+    so the plate is handed back as a part of its own and the ``core_screw``
+    items are what join them.
     """
     if state.has_plate:
         raise FeatureSkipped(
@@ -555,11 +612,13 @@ def apply_plate(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
 
     bodies.half_a = cut(bodies.half_a, state.discard, "plane -> A")
     bodies.half_b = cut(bodies.half_b, state.discard, "plane -> B")
-    state.pieces.append(state.plate)
+    if not state.detachable:
+        state.pieces.append(state.plate)
 
     measured = np.asarray(state.plate.vertices) @ state.axis
     return {
         "id": item.id,
+        "detachable": bool(state.detachable),
         "plane_offset_mm": round(float(state.plane), 2),
         "thickness_mm": round(float(measured.max() - measured.min()), 2),
         "asked_thickness_mm": round(thickness, 2),
@@ -955,6 +1014,285 @@ def apply_screw(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
 
 
 # --------------------------------------------------------------------------
+# mount screws: bolting a detachable core to the plate
+# --------------------------------------------------------------------------
+
+# How far below the cut plane the "is there core here" probes sit. A point
+# exactly *on* the face is a coin flip for a containment test; a millimetre
+# under it is unambiguous and still reads the face's own outline.
+_FACE_PROBE_MM = 1.0
+
+
+def blind_depth(
+    body: trimesh.Trimesh,
+    start,
+    axis,
+    limit: float,
+    radius: float,
+    *,
+    rays: int = 8,
+    step: float = 1.0,
+) -> float:
+    """How deep a bore of this radius stays wholly inside ``body``.
+
+    Containment along a ring rather than a ray down the axis, for the same
+    reason :func:`free_depth` casts a ring: a bore that grazes the core's
+    surface has broken out of it just as surely as one aimed at the surface,
+    and on a core "outside" is the cast. Measured rather than tested pass/fail,
+    because how much core there is under a point is a property of the scan, and
+    a screw that engages six millimetres is a screw.
+    """
+    axis = unit(axis)
+    start = np.asarray(start, dtype=np.float64).reshape(3)
+    frame = Frame.from_direction(axis)
+    theta = np.linspace(0.0, 2.0 * np.pi, int(rays), endpoint=False)
+    ring = np.column_stack(
+        [radius * np.cos(theta), radius * np.sin(theta), np.zeros(len(theta))]
+    )
+    offsets = np.vstack([frame.to_world(ring), np.zeros(3)])
+
+    limit = float(limit)
+    if limit <= 0.0:
+        return 0.0
+    depths = np.unique(np.append(np.arange(float(step), limit, float(step)), limit))
+    pts = (
+        start.reshape(1, 1, 3)
+        + depths.reshape(-1, 1, 1) * axis.reshape(1, 1, 3)
+        + offsets.reshape(1, -1, 3)
+    )
+    try:
+        inside = body.contains(pts.reshape(-1, 3)).reshape(len(depths), -1).all(axis=1)
+    except Exception:  # pragma: no cover - contains needs a closed mesh
+        return 0.0
+    if inside.all():
+        return limit
+    first_out = int(np.argmin(inside))
+    return float(depths[first_out - 1]) if first_out else 0.0
+
+
+def cut_face_room(state: CoreState, *, cell: float = 2.0):
+    """The core's cut face as a grid, with each node's distance from its edge.
+
+    The mount screws' answer to :meth:`FeatureContext.free_distance`. A screw
+    into the core has to land where there is core under it *and* core all round
+    it, and one distance transform over the face says both at once. Returns
+    ``(frame, xs, ys, room)`` in the pour frame, with ``room`` zero everywhere
+    off the face.
+    """
+    if state.plane is None:
+        return None
+    frame = Frame.from_direction(state.axis)
+    local = frame.to_local(state.body.vertices)
+    face = local[local[:, 2] >= state.plane - 1.0]
+    if len(face) < 3:
+        return None
+
+    lo = face[:, :2].min(axis=0) - cell
+    hi = face[:, :2].max(axis=0) + cell
+    xs = np.arange(lo[0], hi[0] + cell, cell)
+    ys = np.arange(lo[1], hi[1] + cell, cell)
+    gx, gy = np.meshgrid(xs, ys, indexing="ij")
+    probe = frame.to_world(
+        np.column_stack(
+            [gx.ravel(), gy.ravel(), np.full(gx.size, state.plane - _FACE_PROBE_MM)]
+        )
+    )
+    try:
+        inside = state.body.contains(probe)
+    except Exception:  # pragma: no cover - contains needs a closed mesh
+        return None
+    if not inside.any():
+        return None
+    room = ndimage.distance_transform_edt(
+        inside.reshape(gx.shape), sampling=(cell, cell)
+    )
+    return frame, xs, ys, room
+
+
+def find_core_screw_sites(
+    ctx, state: CoreState, cfg: MoldConfig, avoid=()
+) -> list[np.ndarray]:
+    """Spots on the core's cut face where it can be bolted to the plate.
+
+    The cut face is the only part of the core the plate can still reach, which
+    makes this a two-dimensional problem: how far in from the face's edge a
+    point is, and how much core there is under it. The first is a distance
+    transform, the second a ring of containment probes down the pour axis, and
+    a position has to pass both -- a bore that breaks out sideways opens into
+    the cast, and one that bottoms out early holds nothing.
+    """
+    mcfg = cfg.core_mount
+    if mcfg.count <= 0 or not state.has_plate:
+        return []
+    grid = cut_face_room(state)
+    if grid is None:
+        log.warning("the cut leaves no core face for the plate to bolt to")
+        return []
+    frame, xs, ys, room = grid
+
+    need = mcfg.radius + mcfg.clearance + mcfg.edge_margin
+    ok = room >= need
+    if not ok.any():
+        log.warning(
+            "the core's cut face is nowhere %.1f mm wide, so nothing on it can "
+            "be bolted down",
+            2.0 * need,
+        )
+        return []
+
+    idx = np.argwhere(ok)
+    uv = np.column_stack([xs[idx[:, 0]], ys[idx[:, 1]]])
+    world = frame.to_world(
+        np.column_stack([uv, np.full(len(uv), float(state.plane))])
+    )
+    score = room[ok]
+
+    if len(avoid):
+        # The port's funnel widens as it goes up the plate, so a screw too close
+        # to it loses the material its head bears on. Keep clear of the funnel
+        # at its widest where the face allows it...
+        gap = np.min(
+            np.linalg.norm(
+                world[:, None, :] - np.asarray(avoid, dtype=np.float64).reshape(1, -1, 3),
+                axis=2,
+            ),
+            axis=1,
+        )
+        far = gap >= need + cfg.carrier.port_outer_radius
+        if not far.any():
+            # ...and on a core too narrow for that, settle for clearing its
+            # throat at the seat, where the funnel is only a wall wide.
+            log.warning(
+                "the core's cut face is too narrow to keep a mount screw out "
+                "from under the port; their heads will crowd it in the plate"
+            )
+            far = gap >= need + cfg.carrier.port_inner_radius
+        uv, world, score = uv[far], world[far], score[far]
+        if not len(uv):
+            return []
+
+    # Most room first: the middle of the face is where a bore has the most core
+    # around it, and the spacing rule below is what stops them all landing there.
+    picked: list[np.ndarray] = []
+    taken: list[np.ndarray] = []
+    probes = 0
+    for c in np.argsort(-score):
+        if len(picked) >= mcfg.count or probes >= 4 * mcfg.count + 8:
+            break
+        if any(np.linalg.norm(uv[c] - q) < mcfg.min_spacing for q in taken):
+            continue
+        probes += 1
+        if blind_depth(
+            state.body, world[c], -state.axis, mcfg.depth, need
+        ) < mcfg.min_depth:
+            continue
+        taken.append(uv[c])
+        picked.append(world[c])
+
+    if len(picked) < mcfg.count:
+        log.warning(
+            "only %d of %d mount screws found enough core to bite into",
+            len(picked),
+            mcfg.count,
+        )
+    return picked
+
+
+def apply_core_screw(bodies, ctx, item, state: CoreState, cfg: MoldConfig) -> dict:
+    """Bolt the core to the plate: a blind bore into one, a hole through the other.
+
+    This is the whole of what separates the two mold types. A glove's core is
+    moulded into the plate and comes out of the cured cast with it; a
+    prosthesis's core stays in the cast, so the one thing it has to be able to
+    do is let go of the plate, and this is what it lets go by.
+
+    Nothing here touches the halves. The screw lives entirely inside the plate
+    and the core, goes in from outside once everything is shut, and comes out
+    before anything is opened, so it is under no release constraint at all --
+    the same exemption the clamping screws get, for the same reason.
+    """
+    if not state.detachable:
+        raise FeatureSkipped(
+            "this core is moulded into its plate as one printed body, so there "
+            "is nothing to unbolt; build with core mode 'prosthesis' for a core "
+            "that is left in the cast"
+        )
+    p = state.axis
+    frame = Frame.from_direction(p)
+    up = frame.to_local(p)
+    r = float(item.params["radius"])
+    clear = r + float(item.params["clearance"])
+    head_r = float(item.params["head_radius"])
+    head_d = float(item.params["head_depth"])
+
+    plate_top = float((np.asarray(state.plate.vertices) @ p).max())
+    thickness = plate_top - state.plane
+    if thickness <= 1.0:
+        raise FeatureSkipped("the plate is too thin to take a screw through it")
+
+    start = _on_plane(item.position, p, state.plane)
+    depth = blind_depth(
+        state.body,
+        start,
+        -p,
+        float(item.params["depth"]),
+        r + cfg.core_mount.edge_margin,
+    )
+    if depth < cfg.core_mount.min_depth:
+        raise FeatureSkipped(
+            f"only {depth:.1f} mm of core under this point before the bore "
+            f"would break out through the wall into the cast (needs "
+            f"{cfg.core_mount.min_depth:.0f} mm)"
+        )
+
+    # Into the core, from the seat down. The merge depth above the plane is in
+    # space the plate occupies, so it costs the core nothing and keeps the
+    # bore's mouth off the seating face as a coplanar boolean.
+    state.holes.append(
+        place_local(
+            frustum(r, r, depth + _MERGE_MM, sections=24),
+            frame,
+            frame.to_local(start - p * depth),
+            up,
+        )
+    )
+    # ...and a clearance hole the rest of the way through the plate, because the
+    # screw has to pull the plate down onto the core rather than jack against it.
+    state.holes.append(
+        place_local(
+            frustum(clear, clear, thickness + 2.0 * _MERGE_MM, sections=24),
+            frame,
+            frame.to_local(start - p * _MERGE_MM),
+            up,
+        )
+    )
+    # A counterbore, so the head sits in the plate instead of proud of it. It is
+    # kept a millimetre short of the seat: a head pocket that breaks through
+    # would leave the screw nothing to pull against.
+    head_d = min(head_d, thickness - 1.0)
+    if head_d > 0.05 and head_r > clear:
+        state.holes.append(
+            place_local(
+                frustum(head_r, head_r, head_d + _MERGE_MM, sections=24),
+                frame,
+                frame.to_local(start + p * (thickness - head_d)),
+                up,
+            )
+        )
+    else:
+        head_d = 0.0
+
+    return {
+        "id": item.id,
+        "start_world": [round(float(v), 2) for v in start],
+        "depth_mm": round(depth, 2),
+        "through_plate_mm": round(thickness, 2),
+        "pilot_diameter_mm": round(2.0 * r, 2),
+        "head_depth_mm": round(head_d, 2),
+    }
+
+
+# --------------------------------------------------------------------------
 # the pour port through the plate
 # --------------------------------------------------------------------------
 
@@ -1203,6 +1541,42 @@ def release_report(
         "core_vs_half_b_mm3": round(overlap_b, 6),
         "fraction": round(worst / scale, 10),
         "releases": bool(worst / scale <= tol_fraction),
+    }
+
+
+def detach_report(
+    core: trimesh.Trimesh,
+    plate: trimesh.Trimesh,
+    pour_axis,
+    *,
+    travel: float | None = None,
+    tol_fraction: float = 1.0e-6,
+) -> dict:
+    """Does the plate actually come off a detachable core?
+
+    Guaranteed by construction -- the plane cuts the core flush and the plate
+    begins exactly where the core stops, so lifting it along the pour axis can
+    never meet anything. Which is why it is worth measuring: a number here means
+    the flush cut did not happen and the two would print as one lump with the
+    screws boring uselessly through the middle of it.
+    """
+    p = unit(pour_axis)
+    if travel is None:
+        travel = max(5.0, 0.1 * float(plate.scale))
+
+    resting = validate.overlap_volume(core, plate)
+    moved = plate.copy()
+    moved.apply_translation(p * travel)
+    lifted = validate.overlap_volume(core, moved)
+
+    scale = abs(float(plate.volume)) or 1.0
+    worst = max(resting, lifted)
+    return {
+        "travel_mm": round(float(travel), 3),
+        "resting_overlap_mm3": round(resting, 6),
+        "lifted_overlap_mm3": round(lifted, 6),
+        "fraction": round(worst / scale, 10),
+        "detaches": bool(worst / scale <= tol_fraction),
     }
 
 

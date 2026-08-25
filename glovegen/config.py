@@ -102,6 +102,18 @@ class VentConfig:
     min_spacing: float = 12.0
 
 
+# What becomes of the core once the cast has cured, which is the one thing the
+# two hollow-cast mold types disagree about.
+#
+# "glove"      -- the core comes back out. It is moulded into the carrier plate
+#                 as a single printed body, and pulling the plate pulls it out
+#                 of the cured cast, leaving a hollow glove.
+# "prosthesis" -- the core stays in. The cast closes around it for good, so it
+#                 is printed on its own and *bolted* to the plate: unbolt it and
+#                 the plate leaves with the mold, the core with the cast.
+CORE_MODES = ("glove", "prosthesis")
+
+
 @dataclass
 class CoreConfig:
     """The core: the body a *hollow* cast is formed against.
@@ -112,6 +124,11 @@ class CoreConfig:
     """
 
     enabled: bool = False
+
+    # Which mold type this is: see CORE_MODES. It decides one thing only --
+    # whether the core is fused to the carrier plate or bolted to it -- and
+    # everything else about a core run is the same either way.
+    mode: str = "glove"
 
     # The glove wall: the gap left between the cavity and the core, and so the
     # thickness of the cast. Everything about fixation is in service of holding
@@ -129,6 +146,19 @@ class CoreConfig:
     # 63 s. Raise it when the wall matters more than the minute.
     ball_subdivisions: int = 1
 
+    def __post_init__(self) -> None:
+        # A typo here would quietly build the *other* mold type, which is not
+        # something you find out about until the cast has cured around a core
+        # that was meant to come back out.
+        if self.mode not in CORE_MODES:
+            raise ValueError(
+                f"core.mode must be one of {CORE_MODES}, got {self.mode!r}"
+            )
+
+    @property
+    def detachable(self) -> bool:
+        """Does the core unbolt from the plate rather than being moulded into it?"""
+        return self.mode == "prosthesis"
 
 
 @dataclass
@@ -169,6 +199,39 @@ class CarrierConfig:
     # before its half-round groove stops being widest at its mouth -- past this
     # the groove is an undercut and the core locks into the halves.
     max_seam_drift: float = 0.4
+
+
+@dataclass
+class CoreMountConfig:
+    """Screws that bolt a *detachable* core to the carrier plate.
+
+    Only a ``prosthesis`` run has any. A glove's core is moulded into the plate
+    and comes out of the cast with it, so it needs no fastener; a prosthesis's
+    core is left inside the cured cast, so the one thing it must be able to do
+    is let go of the plate. These are what it lets go by.
+
+    They run down the pour axis, straight through the plate into the core's cut
+    face, which is the one face of the core the plate can still reach once the
+    plane has cut everything else away. Nothing else about the mold changes.
+    """
+
+    count: int = 3
+    radius: float = 2.0  # pilot bore into the core
+    depth: float = 12.0
+    # A screw that only reaches this far into the core is not worth cutting;
+    # below it the position is reported as skipped rather than bored shallow.
+    min_depth: float = 5.0
+    clearance: float = 0.4  # added for the through-hole in the plate
+
+    # Counterbore, so the head sits in the plate rather than proud of it. A
+    # zero depth leaves a plain through-hole and the head bearing on the face.
+    head_radius: float = 4.0
+    head_depth: float = 3.0
+
+    # Core material kept around the bore, beyond its own radius: this is what
+    # stops a screw near the rim from breaking out through the glove wall.
+    edge_margin: float = 2.0
+    min_spacing: float = 10.0
 
 
 @dataclass
@@ -265,6 +328,7 @@ class MoldConfig:
     carrier: CarrierConfig = field(default_factory=CarrierConfig)
     core_dowels: CoreDowelConfig = field(default_factory=CoreDowelConfig)
     core_tabs: CoreTabConfig = field(default_factory=CoreTabConfig)
+    core_mount: CoreMountConfig = field(default_factory=CoreMountConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -283,6 +347,7 @@ class MoldConfig:
             "carrier": CarrierConfig,
             "core_dowels": CoreDowelConfig,
             "core_tabs": CoreTabConfig,
+            "core_mount": CoreMountConfig,
         }
         kwargs: dict[str, Any] = {}
         for name, klass in sub.items():

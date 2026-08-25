@@ -34,10 +34,16 @@ glovegen mold data/samples/Hand_Child.stl -o out/ --plan plan.json
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5
 glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5 --plate --dowels 2
 
-# or use the web app: "Cast a hollow glove" under Mold turns the core on, the
-# plate, dowels and tabs are opt-in beside it, and every one of them becomes
-# an editable row once the mold is built — including a slider for where the
-# plate's plane cuts. Re-applying does not rebuild the mold or the core.
+# the second mold type: the core is *left inside* the cast, so it is printed
+# on its own and bolted to the plate rather than moulded into it. Unbolt it
+# and the plate leaves with the mold, the core with the finished prosthesis.
+glovegen mold data/samples/Hand_Child.stl -o out/ --wall 2.5 --prosthesis
+
+# or use the web app: "Cast a hollow glove" under Mold turns the core on, a
+# mold type picks glove or prosthesis, the plate, dowels and tabs are opt-in
+# beside it, and every one of them becomes an editable row once the mold is
+# built — including a slider for where the plate's plane cuts. Re-applying
+# does not rebuild the mold or the core.
 uvicorn server.app:app --reload   # then open http://127.0.0.1:8000
 ```
 
@@ -220,6 +226,7 @@ second body inside the cavity — the core — with the cast forming in the gap.
 glovegen mold scan.stl -o out/ --wall 2.5            # core.stl, and that is all
 glovegen mold scan.stl -o out/ --wall 2.5 --plate    # ...cut and capped
 glovegen mold scan.stl -o out/ --wall 2.5 --dowels 2 # ...and pinned to the halves
+glovegen mold scan.stl -o out/ --wall 2.5 --prosthesis  # ...core bolted on, not fused
 ```
 
 The wall is then only as good as the core's position, and a core that is merely
@@ -264,6 +271,59 @@ allowed to sit off the parting seam.
 The block's pull frame is rolled to line up with the pour axis when a core is
 asked for, so a box block has two faces square to the cut. Without that, slicing
 an arbitrarily-rolled box on an oblique plane gives a corner wedge.
+
+#### Two mold types: the core comes out, or it stays in
+
+Everything above is the **glove** type. The plate swallows the core's stub, the
+two print as one body, and pulling the plate pulls the core back out of the
+cured cast.
+
+A **prosthesis** inverts the one requirement. There the core is not scaffolding
+to be removed, it is the finished part's inner structure: the silicone closes
+around it for good. So the thing it has to be able to let go of is the *plate* —
+and a stub moulded into the plate cannot let go of anything.
+
+```
+                       ██ core   ▓▓ plate   ─╪─ screw
+
+glove       core ██████████▓▓▓▓▓▓▓▓   the stub crosses the cut and fuses: one
+                         ↑ cut        printed body, and it comes out of the
+                                      cured cast when the plate is pulled
+
+prosthesis  core ████████ ▓▓▓▓▓▓▓▓▓   the core stops at the cut and a screw
+                     ────╪────        runs back through the plate into it —
+                         ↑ cut        back that out and the plate leaves alone
+```
+
+That is the whole of `--prosthesis`. The plane cut trims the core flush instead
+of a merge depth past it, the plate comes back as `carrier_plate.stl` rather
+than as part of `core.stl`, and `core_screw` items bore blind into the core's
+cut face and clear through the plate above it. Nothing else about the mold
+changes: the same plane, the same port, the same clamping screws, the same
+dowels, the same assembly sequence — with one more step at the end, which is
+backing three screws out.
+
+The cut face is the only part of the core the plate can still reach, which makes
+placing them a two-dimensional problem: a distance transform over the face says
+how far in from its edge a point is, and a ring of containment probes down the
+pour axis says how much core there is under it. A bore has to pass both. One
+that breaks out sideways opens into the cast; one that bottoms out early holds
+nothing. Each gets whatever depth the core leaves, down to `min_depth`, and
+anything shallower is reported as skipped with the number in the reason.
+
+Two things are worth saying out loud about this joint. The core is located
+laterally by its seat — a flat face against a flat face — and by the screw
+shanks through clearance holes, so it has the slop those holes have; and a
+**seam tab** in this mode is not a tab you drag out of a glove, it is a post
+left sticking out through the wall of a finished prosthesis. The report gives
+the same `tab_through_wall_mm3` either way, and a dowel is the way out of it in
+both.
+
+`release` and `detach` are both measured. The first is the core coming out of
+the halves, which is what every core-side feature being centred on the parting
+surface buys. The second is the plate coming off the core, which the flush cut
+buys — guaranteed by construction, and therefore exactly the thing worth
+checking, because a plate still fused to its core looks perfectly finished.
 
 #### Sealing the annulus means the pour moves
 
@@ -335,12 +395,13 @@ bore gets whatever depth the cavity leaves, down to half a diameter.
 
 #### The plate, the dowels and the tabs are ordinary plan items
 
-`plate`, `dowel`, `screw`, `port` and `core_tab` are feature-plan kinds beside
-`key`, `spout` and `vent` — same positions, same clamped sizes, same
-skipped-with-a-reason handling, same editor, same `--plan` round trip. A second
-parallel plan document would have been a worse version of the one that already
-exists. `apply_plan` returns a `Bodies` rather than a pair of halves, because
-the plan now builds the core as well as cutting the mold.
+`plate`, `dowel`, `screw`, `core_screw`, `port` and `core_tab` are feature-plan
+kinds beside `key`, `spout` and `vent` — same positions, same clamped sizes,
+same skipped-with-a-reason handling, same editor, same `--plan` round trip. A
+second parallel plan document would have been a worse version of the one that
+already exists. `apply_plan` returns a `Bodies` rather than a pair of halves,
+because the plan now builds the core as well as cutting the mold — and, on a
+prosthesis run, the plate beside it.
 
 The core is built *before* the plan, not after: the plate has to have something
 to attach to before it can be placed, and placement is staged against the
@@ -438,6 +499,10 @@ offset-shelling approach.
 - A carrier plate **throws away** everything past its plane, from the scan as
   well as from the mold. That is the point, but the discarded volume is
   reported so it is never a surprise.
+- A **prosthesis** core is located on the plate by a flat seat and screws
+  through clearance holes, so it carries the slop those holes have; and a seam
+  tab there is left protruding through the wall of the finished part rather
+  than dragged out of a glove. Both are reported, neither is designed away.
 - A box block around a hand-and-forearm scan is ~4.2 L of plastic. Use
   `--block hull`, or crop the scan to the hand.
 - No auto-tiling to a printer bed: the hand mold's halves are ~150 × 78 × 386 mm
@@ -456,7 +521,8 @@ glovegen/
   parting.py        constrained height field -> parting surface + solid
   mold.py           block, block−part, the split
   features.py       the feature plan: choosing keys/spout/vents, and cutting them
-  core.py           hollow-cast core: erosion, the plane cut, plate and tabs
+  core.py           hollow-cast core: erosion, the plane cut, plate and tabs,
+                    and the screws a detachable core bolts on with
   pipeline.py       orchestration + reporting, and re-cutting an edited plan
   validate.py       solid gating, separation measurement
   cli.py            glovegen analyze | mold
@@ -465,7 +531,7 @@ server/
   store.py          disk-backed persistence, TTL, orphan reaping
   worker.py         job bodies (prepare | analyze | mold | features), out-of-process
   static/           three.js viewer: live heatmap, then the editable feature plan
-tests/              159 tests
+tests/              231 tests
 ```
 
 ## Deployment
@@ -546,6 +612,14 @@ A core is off unless asked for: `--wall` on the command line, or
 dowels and the tabs are off on top of that — `carrier`, `core_dowels` and
 `core_tabs`, or `--plate`, `--dowels N` and `--tabs N` — so a wall on its own
 gets you a core and leaves the mold alone.
+
+Which of the two mold types you get is `core.mode`: `"glove"` (the default —
+the core comes back out of the cast) or `"prosthesis"` (it stays in, and bolts
+to the plate rather than being moulded into it), or `--prosthesis`, which also
+switches the plate on because that is what the core bolts to. `core_mount`
+sizes those screws. An unknown mode is an error rather than a silent fallback:
+building the wrong type is not something you find out about until the cast has
+cured.
 
 Environment: `GLOVEGEN_STORE` (default `data/store`, `/data/store` in the
 image), `GLOVEGEN_TTL_HOURS` (24), `GLOVEGEN_MAX_UPLOAD_MB` (400),
