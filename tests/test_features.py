@@ -56,6 +56,47 @@ class TestPourAxis:
             features.choose_pour_axis(taper, MoldConfig(pour_axis="up"))
 
 
+class TestPourPreview:
+    """What the viewport draws while the axis is being dragged."""
+
+    def test_it_answers_for_the_automatic_axis(self, taper):
+        out = features.pour_preview(taper)
+        assert out["axis"] == pytest.approx(
+            features.choose_pour_axis(taper, MoldConfig()), abs=1e-5
+        )
+        # The taper's fat end is at +Z, so that is where the spout breaks in.
+        assert out["entry"][2] > 20.0
+        assert out["span"][0] < out["span"][1]
+        assert out["radius"] > 0.0
+
+    def test_the_entry_follows_the_axis(self, taper):
+        flipped = features.pour_preview(taper, axis=[0, 0, -1])
+        assert flipped["entry"][2] < -10.0
+        assert flipped["axis"] == pytest.approx([0, 0, -1])
+
+    def test_it_agrees_with_what_the_planner_would_place(self, two_prong):
+        """The preview is only useful if it is the same answer, cheaper."""
+        cfg = MoldConfig()
+        axis = np.array([0.0, 0.0, 1.0])
+        out = features.pour_preview(two_prong, cfg, axis=axis)
+        assert out["entry"] == pytest.approx(
+            features.cavity_high_point(two_prong, axis), abs=1e-3
+        )
+        traps = features.find_air_traps(
+            two_prong, axis, cfg.vents, spout_world=np.array(out["entry"])
+        )
+        assert len(out["vents"]) == len(traps)
+
+    def test_a_zero_axis_is_refused(self, taper):
+        with pytest.raises(ValueError):
+            features.pour_preview(taper, axis=[0, 0, 0])
+
+    def test_vents_switched_off_are_not_searched_for(self, two_prong):
+        cfg = MoldConfig()
+        cfg.vents.enabled = False
+        assert features.pour_preview(two_prong, cfg, axis=[0, 0, 1])["vents"] == []
+
+
 class TestAirTraps:
     def test_finds_the_shorter_prong(self, two_prong):
         """The prong that does not get the spout is a trapped-air pocket."""

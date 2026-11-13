@@ -392,6 +392,58 @@ class TestRoundTrip:
         for body in ({}, {"direction": [0, 0, 0]}, {"direction": [1, 2]}):
             assert client.post(f"/api/meshes/{mesh_id}/heatmap", json=body).status_code == 422
 
+    def test_pour_preview_answers_for_a_dragged_axis(self, client, part_bytes):
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball4.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+
+        auto = client.post(f"/api/meshes/{mesh_id}/pour-preview", json={})
+        assert auto.status_code == 200
+        assert len(auto.json()["axis"]) == 3
+
+        up = client.post(
+            f"/api/meshes/{mesh_id}/pour-preview", json={"axis": [0, 0, 2]}
+        ).json()
+        assert up["axis"] == pytest.approx([0, 0, 1])
+        # A ball's high point along +Z is its north pole.
+        assert up["entry"][2] > 10.0
+        assert up["span"][1] > up["span"][0]
+
+        down = client.post(
+            f"/api/meshes/{mesh_id}/pour-preview", json={"axis": [0, 0, -1]}
+        ).json()
+        assert down["entry"][2] < -10.0
+
+    def test_pour_preview_rejects_bad_axes(self, client, part_bytes):
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball5.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+        for body in ({"axis": [0, 0, 0]}, {"axis": [1, 2]}, {"axis": "up"}):
+            res = client.post(f"/api/meshes/{mesh_id}/pour-preview", json=body)
+            assert res.status_code == 422, body
+
+    def test_a_bad_pour_axis_fails_the_request_not_the_job(self, client, part_bytes):
+        mesh_id = client.post(
+            "/api/meshes", files={"file": ("ball6.stl", part_bytes)}
+        ).json()["mesh"]["id"]
+        assert _wait_mesh(client, mesh_id) == "ready"
+        res = client.post(
+            "/api/jobs",
+            json={"mesh_id": mesh_id, "kind": "mold", "config": {"pour_axis": "up"}},
+        )
+        assert res.status_code == 422
+        ok = client.post(
+            "/api/jobs",
+            json={
+                "mesh_id": mesh_id,
+                "kind": "analyze",
+                "config": {"pour_axis": [0, 0, 1]},
+            },
+        )
+        assert ok.status_code == 200
+
     def test_mesh_can_be_deleted(self, client, part_bytes):
         mesh_id = client.post(
             "/api/meshes", files={"file": ("ball3.stl", part_bytes)}

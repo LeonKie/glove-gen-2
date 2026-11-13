@@ -180,17 +180,18 @@ def build_mold(
     report = progress or (lambda *a, **k: None)
     timings: dict[str, float] = {}
 
-    # The roll of the pull frame is normally arbitrary. A core run pins it to
-    # the pour axis so two of the block's faces come out square to it: the
-    # carrier plate is trimmed perpendicular to the pour axis, and slicing an
-    # arbitrarily-rolled box on an oblique plane gives a corner wedge instead of
-    # a plate. Imported here because features.py builds on this module.
-    seed = None
-    if cfg.core.enabled and cfg.carrier.enabled:
-        from .features import choose_pour_axis
+    # The roll of the pull frame about the pull direction is otherwise whatever
+    # align_vectors happened to return -- an orientation nobody chose, and one
+    # the block, the parting grid and the plate are then all built in. Seeding
+    # it with the pour axis makes the block square to the way the mold is stood
+    # up to fill: two of its faces come out perpendicular to the pour, which is
+    # what the carrier plate needs (slicing an arbitrarily-rolled box on an
+    # oblique plane gives a corner wedge instead of a plate) and what makes the
+    # block read as deliberate on every other run.
+    # Imported here because features.py builds on this module.
+    from .features import choose_pour_axis
 
-        seed = choose_pour_axis(mesh, cfg)
-    frame = Frame.from_direction(direction, seed=seed)
+    frame = Frame.from_direction(direction, seed=choose_pour_axis(mesh, cfg))
 
     cavity = mesh
     if cfg.cavity_faces:

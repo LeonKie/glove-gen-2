@@ -26,6 +26,15 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         help="pin the pull direction instead of searching for it",
     )
     p.add_argument(
+        "--pour-axis",
+        nargs=3,
+        type=float,
+        metavar=("X", "Y", "Z"),
+        help="which way is up when the mold is filled; default is the part's "
+        "long axis, fat end up. Squares the block, aims the spout and sets "
+        "the plate's cut plane",
+    )
+    p.add_argument(
         "--proxy-faces",
         type=int,
         default=None,
@@ -42,6 +51,8 @@ def _config_from_args(args) -> MoldConfig:
     ):
         if value is not None:
             setattr(cfg, name, value)
+    if getattr(args, "pour_axis", None):
+        cfg.pour_axis = tuple(float(v) for v in args.pour_axis)
     if getattr(args, "grid", None):
         cfg.parting.grid = args.grid
     if getattr(args, "proxy_faces", None):
