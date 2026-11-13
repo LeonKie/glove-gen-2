@@ -217,6 +217,7 @@ select {
 .grp-head .dot.key { background: #52a8ff; }
 .grp-head .dot.spout { background: var(--ok); }
 .grp-head .dot.vent { background: var(--warn); }
+.grp-head .dot.notch { background: #e06c9f; }
 .grp-head .grp-name { font-size: 12px; font-weight: 600; }
 .grp-head .count { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
 .grp-head .add { margin-left: auto; }

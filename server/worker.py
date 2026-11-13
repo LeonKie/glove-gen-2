@@ -21,6 +21,7 @@ import trimesh
 
 from glovegen import demold, features, meshio, pipeline, viewer_format
 from glovegen.config import MoldConfig
+from glovegen.mold import build_block
 from glovegen.parting import PartingSurface
 
 from .store import Store
@@ -286,13 +287,20 @@ def _load_context(store: Store, base_job_id: str) -> features.FeatureContext:
     else:
         cavity = meshio.load_npz(base_dir / ctx_data["cavity"])
 
-    core = block = None
+    surface = PartingSurface.load(base_dir / "parting.npz")
+    core = None
     if ctx_data.get("core"):
         core = meshio.load_npz(base_dir / "core_body.npz")
         block = meshio.load_npz(base_dir / "block.npz")
+    else:
+        # A pry notch needs to know where the block's wall is, which the bounds
+        # alone do not say for a hull block. Only a core run caches the block,
+        # but it is a convex hull of the cavity and costs nothing to make again.
+        cfg = MoldConfig.from_dict(ctx_data.get("config") or {})
+        block, _ = build_block(cavity, surface.frame, cfg.block_margin, cfg.block_shape)
 
     return features.FeatureContext(
-        surface=PartingSurface.load(base_dir / "parting.npz"),
+        surface=surface,
         local_bounds=np.asarray(ctx_data["local_bounds"], dtype=float),
         cavity=cavity,
         block=block,

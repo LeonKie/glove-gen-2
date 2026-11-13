@@ -198,6 +198,10 @@ class TestApplyFeatures:
     def built(self, taper):
         cfg = MoldConfig(block_margin=8.0, pour_axis=(0.0, 0.0, 1.0))
         cfg.parting.grid = 110
+        # Notches take more out of half A than the keys put on, which would
+        # hide what the volume checks below are looking for. They have their
+        # own tests, full plan included.
+        cfg.notches.enabled = False
         res = mold.build_mold(taper, [1, 0, 0], cfg)
         (a, b, _), rep = features.apply_features(res, taper, cfg)
         return res, a, b, rep
@@ -239,10 +243,12 @@ class TestApplyFeatures:
         cfg = MoldConfig(block_margin=8.0)
         cfg.parting.grid = 90
         cfg.keys.enabled = cfg.spout.enabled = cfg.vents.enabled = False
+        cfg.notches.enabled = False
         res = mold.build_mold(taper, [1, 0, 0], cfg)
         (a, b, _), rep = features.apply_features(res, taper, cfg)
         assert a is res.half_a and b is res.half_b
         assert rep.keys == {} and rep.spout == {} and rep.vents == {}
+        assert rep.notches == {}
 
     def test_every_planned_item_is_accounted_for(self, built):
         _, _, _, rep = built
@@ -346,3 +352,100 @@ class TestApplyEditedPlan:
         for half in (a, b):
             assert validate.solid_report(half)["boundary_edges"] == 0
         assert validate.separation_report(a, b, taper, res.direction)["opens"]
+
+
+class TestPryNotches:
+    """Slots on the seam for levering the halves apart."""
+
+    @pytest.fixture(scope="class", params=["box", "hull"])
+    def base(self, request, taper):
+        cfg = MoldConfig(block_margin=8.0, pour_axis=(0.0, 0.0, 1.0))
+        cfg.block_shape = request.param
+        cfg.parting.grid = 110
+        res = mold.build_mold(taper, [1, 0, 0], cfg)
+        ctx = features.FeatureContext.from_mold(res, taper)
+        return res, ctx, cfg
+
+    @staticmethod
+    def only_notches(plan):
+        return FeaturePlan(items=plan.of_kind("notch"), pour_axis=plan.pour_axis)
+
+    def test_proposed_on_the_wall_and_spread_out(self, base):
+        _, ctx, cfg = base
+        notches = features.plan_features(ctx, cfg).of_kind("notch")
+        assert 2 <= len(notches) <= cfg.notches.count
+        pts = np.array([n.position for n in notches])
+        # On the block's surface, and on the seam.
+        assert np.abs(ctx.inside_block(pts)).max() < 0.05
+        local = ctx.frame.to_local(pts)
+        for row in local:
+            assert abs(row[2] - ctx.height_at(row)[0]) < 0.05
+        gaps = [
+            np.linalg.norm(pts[i] - pts[j])
+            for i in range(len(pts))
+            for j in range(i + 1, len(pts))
+        ]
+        assert min(gaps) >= 3.0 * cfg.notches.width
+
+    def test_takes_half_a_slot_out_of_each_half(self, base):
+        res, ctx, cfg = base
+        plan = self.only_notches(features.plan_features(ctx, cfg))
+        (a, b, _), rep = features.apply_plan(res.half_a, res.half_b, ctx, plan, cfg=cfg)
+        assert rep.notches["count"] == len(plan.items)
+        n = cfg.notches
+        # The slot overshoots the wall, so on a leaning hull wall slightly less
+        # than the full box is inside the block.
+        slot = n.width * n.depth * n.height * len(plan.items)
+        lost_a = res.half_a.volume - a.volume
+        lost_b = res.half_b.volume - b.volume
+        assert lost_a > 0.3 * slot and lost_b > 0.3 * slot
+        assert 0.75 * slot <= lost_a + lost_b <= 1.02 * slot
+
+    def test_halves_stay_solid_and_still_open(self, base, taper):
+        res, ctx, cfg = base
+        plan = features.plan_features(ctx, cfg)
+        (a, b, _), rep = features.apply_plan(res.half_a, res.half_b, ctx, plan, cfg=cfg)
+        assert not [i for i in rep.items if i["kind"] == "notch" and i["status"] != "applied"]
+        for half in (a, b):
+            assert validate.solid_report(half)["boundary_edges"] == 0
+            assert len(half.split(only_watertight=False)) == 1
+        assert validate.separation_report(a, b, taper, res.direction)["opens"]
+
+    def test_a_click_inside_the_block_snaps_to_the_wall(self, base):
+        res, ctx, cfg = base
+        auto = features.plan_features(ctx, cfg).of_kind("notch")[0]
+        site = features.notch_site(ctx, auto.position, auto.params)
+        clicked = site.wall - site.outward * 4.0
+        plan = FeaturePlan(
+            items=[FeatureItem(kind="notch", position=clicked, source="user")],
+            pour_axis=[0.0, 0.0, 1.0],
+        )
+        _, rep = features.apply_plan(res.half_a, res.half_b, ctx, plan, cfg=cfg)
+        (entry,) = rep.items
+        assert entry["status"] == "applied", entry
+        assert np.linalg.norm(np.array(entry["detail"]["wall_world"]) - site.wall) < 1.0
+
+    def test_a_slot_that_would_reach_the_cavity_is_refused(self, base):
+        res, ctx, cfg = base
+        auto = features.plan_features(ctx, cfg).of_kind("notch")[0]
+        plan = FeaturePlan(
+            items=[
+                FeatureItem(kind="notch", position=auto.position, params={"depth": 30.0})
+            ],
+            pour_axis=[0.0, 0.0, 1.0],
+        )
+        (a, b, _), rep = features.apply_plan(res.half_a, res.half_b, ctx, plan, cfg=cfg)
+        (entry,) = rep.items
+        assert entry["status"] == "skipped"
+        assert "cavity" in entry["reason"]
+        assert a is res.half_a and b is res.half_b
+
+    def test_keeps_clear_of_the_keys_and_the_spout(self, base):
+        _, ctx, cfg = base
+        plan = features.plan_features(ctx, cfg)
+        n = cfg.notches
+        reach = float(np.hypot(n.depth, n.width / 2.0))
+        for notch in plan.of_kind("notch"):
+            for key in plan.of_kind("key"):
+                gap = np.linalg.norm(np.array(notch.position) - np.array(key.position))
+                assert gap >= key.params["radius"] + reach

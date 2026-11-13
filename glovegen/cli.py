@@ -63,6 +63,10 @@ def _config_from_args(args) -> MoldConfig:
         cfg.spout.enabled = False
     if getattr(args, "no_vents", False):
         cfg.vents.enabled = False
+    if getattr(args, "no_notches", False):
+        cfg.notches.enabled = False
+    if getattr(args, "notches", None) is not None:
+        cfg.notches.count = args.notches
     if getattr(args, "keys", None) is not None:
         cfg.keys.count = args.keys
     if getattr(args, "vents", None) is not None:
@@ -104,6 +108,8 @@ def _config_from_args(args) -> MoldConfig:
         (cfg.spout, "inner_radius", "spout_inner"),
         (cfg.spout, "outer_radius", "spout_outer"),
         (cfg.vents, "radius", "vent_radius"),
+        (cfg.notches, "width", "notch_width"),
+        (cfg.notches, "depth", "notch_depth"),
     ):
         value = getattr(args, option, None)
         if value is not None:
@@ -242,9 +248,14 @@ def main(argv: list[str] | None = None) -> int:
     p_mo.add_argument("--cavity-offset", type=float, default=None, help="grow the cavity, mm")
     p_mo.add_argument("--keys", type=int, default=None, help="number of alignment keys")
     p_mo.add_argument("--vents", type=int, default=None, help="maximum number of vents")
+    p_mo.add_argument(
+        "--notches", type=int, default=None,
+        help="number of pry notches on the seam, for levering the halves apart",
+    )
     p_mo.add_argument("--no-keys", action="store_true")
     p_mo.add_argument("--no-spout", action="store_true")
     p_mo.add_argument("--no-vents", action="store_true")
+    p_mo.add_argument("--no-notches", action="store_true")
 
     sizes = p_mo.add_argument_group(
         "feature sizes",
@@ -263,6 +274,12 @@ def main(argv: list[str] | None = None) -> int:
         "--spout-outer", type=float, default=None, help="spout radius at the block face, mm"
     )
     sizes.add_argument("--vent-radius", type=float, default=None, help="vent radius, mm")
+    sizes.add_argument(
+        "--notch-width", type=float, default=None, help="pry notch width along the seam, mm"
+    )
+    sizes.add_argument(
+        "--notch-depth", type=float, default=None, help="pry notch depth into the block, mm"
+    )
 
     core = p_mo.add_argument_group(
         "hollow cast",
