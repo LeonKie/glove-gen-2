@@ -18,7 +18,7 @@ const el = {
   pourPick: $('btn-pour-pick'), pourStatus: $('pour-status'), pourStats: $('pour-stats'),
   margin: $('margin'), marginVal: $('margin-val'),
   blockShape: $('block-shape'), grid: $('grid'), gridVal: $('grid-val'),
-  optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'),
+  optKeys: $('opt-keys'), optSpout: $('opt-spout'), optVents: $('opt-vents'), optNotches: $('opt-notches'),
   optCore: $('opt-core'), coreOptions: $('core-options'),
   coreWall: $('core-wall'), coreWallVal: $('core-wall-val'),
   optCarrier: $('opt-carrier'), optTabs: $('opt-tabs'), optDowels: $('opt-dowels'),
@@ -790,6 +790,11 @@ const PARAM_UI = {
     { name: 'outer_radius', label: 'outer r', unit: 'mm', min: 0.5, max: 80, step: 0.5 },
   ],
   vent: [{ name: 'radius', label: 'radius', unit: 'mm', min: 0.2, max: 20, step: 0.1 }],
+  notch: [
+    { name: 'width', label: 'width', unit: 'mm', min: 3, max: 40, step: 0.5 },
+    { name: 'depth', label: 'depth', unit: 'mm', min: 2, max: 30, step: 0.5 },
+    { name: 'height', label: 'height', unit: 'mm', min: 1, max: 10, step: 0.5 },
+  ],
   plate: [{ name: 'thickness', label: 'thickness', unit: 'mm', min: 2, max: 60, step: 0.5 }],
   core_tab: [
     { name: 'radius', label: 'radius', unit: 'mm', min: 0.5, max: 20, step: 0.1 },
@@ -812,19 +817,19 @@ const PARAM_UI = {
 };
 // Mirrors features.KINDS: the plate leads because it is the plane cut, and
 // everything in the core group after it stands on the face that cut leaves.
-const KIND_ORDER = ['plate', 'key', 'spout', 'vent', 'core_tab', 'dowel', 'screw', 'port'];
+const KIND_ORDER = ['plate', 'key', 'spout', 'vent', 'notch', 'core_tab', 'dowel', 'screw', 'port'];
 const CORE_KINDS = new Set(['plate', 'core_tab', 'dowel', 'screw', 'port']);
 const KIND_LABEL = {
-  key: 'Knob', spout: 'Spout', vent: 'Vent',
+  key: 'Knob', spout: 'Spout', vent: 'Vent', notch: 'Notch',
   plate: 'Plate', core_tab: 'Tab', dowel: 'Dowel', screw: 'Screw', port: 'Port',
 };
 const KIND_PLURAL = {
-  key: 'Knobs', spout: 'Spouts', vent: 'Vents',
+  key: 'Knobs', spout: 'Spouts', vent: 'Vents', notch: 'Pry notches',
   plate: 'Carrier plate', core_tab: 'Seam tabs', dowel: 'Seam dowels',
   screw: 'Plate screws', port: 'Pour port',
 };
 const KIND_COLOUR = {
-  key: 0x52a8ff, spout: 0x46b07a, vent: 0xe0a23c,
+  key: 0x52a8ff, spout: 0x46b07a, vent: 0xe0a23c, notch: 0xe06c9f,
   plate: 0xb07ad6, core_tab: 0x3fc4c4, dowel: 0xff8a5c, screw: 0x9aa7b6,
   port: 0x6fd08c,
 };
@@ -858,6 +863,10 @@ function defaultParams(kind) {
   }
   if (kind === 'spout') {
     return { inner_radius: s.inner_radius ?? 4, outer_radius: s.outer_radius ?? 9 };
+  }
+  if (kind === 'notch') {
+    const n = d.notches || {};
+    return { width: n.width ?? 12, depth: n.depth ?? 6, height: n.height ?? 3 };
   }
   if (kind === 'plate') return { thickness: c.plate_thickness ?? 10 };
   if (kind === 'core_tab') return { radius: t.radius ?? 3, clearance: t.clearance ?? 0.2 };
@@ -1136,6 +1145,10 @@ function itemHtml(item, n) {
 // a dowel and a screw are both pins under the plate, and what separates them is
 // which side of the seam they land on.
 const GROUP_NOTE = {
+  notch: 'A slot across the seam at the outside of the block, half in each '
+    + 'half, for a flat screwdriver: blade in, twist, and the halves lift '
+    + 'without the parting face being levered on. Click near the edge; the '
+    + 'slot snaps to the wall.',
   plate: 'Cuts the mold on a plane and caps what is left. Everything past the '
     + 'plane is thrown away — half A, half B and the core alike — so the '
     + 'glove’s rim is the cut. Select the row to move it.',
@@ -1367,7 +1380,7 @@ function selectItem(id, { reveal = false } = {}) {
 // belongs to. The plate itself only needs a height along the pour axis, so
 // anywhere on the scan will do.
 const PLACE_ON = {
-  key: 'parting', spout: 'parting', vent: 'part',
+  key: 'parting', spout: 'parting', vent: 'part', notch: 'parting',
   plate: 'part', core_tab: 'parting', dowel: 'parting',
   screw: 'core', port: 'core',
 };
@@ -1375,6 +1388,7 @@ const PLACE_HINT = {
   key: 'Click the parting surface to drop a knob · Esc to cancel',
   spout: 'Click the parting surface where the mold should be filled · Esc to cancel',
   vent: 'Click the scan where air would be trapped · Esc to cancel',
+  notch: 'Click the parting surface near the edge of the block — the slot snaps to the wall · Esc to cancel',
   plate: 'Click the scan where the mold should be cut — everything past it goes · Esc to cancel',
   core_tab: 'Click the parting surface where a tab should be pinched · Esc to cancel',
   dowel: 'Click the parting surface where the pin should cross it · Esc to cancel',
@@ -1385,6 +1399,7 @@ const MOVE_HINT = {
   key: 'Click the parting surface to move this knob · Esc to cancel',
   spout: 'Click the parting surface to move the spout · Esc to cancel',
   vent: 'Click the scan to move this vent · Esc to cancel',
+  notch: 'Click the parting surface near the edge to move this notch · Esc to cancel',
   plate: 'Click the scan to move the cut · Esc to cancel',
   core_tab: 'Click the parting surface to move this tab · Esc to cancel',
   dowel: 'Click the parting surface to move this pin · Esc to cancel',
@@ -1586,6 +1601,32 @@ function drawMarkers() {
     } else if (item.kind === 'spout') {
       geom = new THREE.ConeGeometry(p.outer_radius, p.outer_radius * 2.2, 24);
       axis = pour;
+    } else if (item.kind === 'notch') {
+      // Which wall the slot opens through is worked out when it is cut. Once
+      // it has been, draw the pocket where it is; until then, a bead on the
+      // seam is all that is known.
+      const d = st.detail;
+      if (d?.wall_world && d?.outward && d?.normal) {
+        const out = new THREE.Vector3(...d.outward);
+        const nrm = new THREE.Vector3(...d.normal);
+        const box = new THREE.Mesh(
+          new THREE.BoxGeometry(p.depth, p.width, p.height),
+          new THREE.MeshBasicMaterial({
+            color: st.status === 'skipped' ? 0xe05c4b : KIND_COLOUR.notch,
+            transparent: true,
+            opacity: chosen ? 0.9 : item.enabled ? 0.6 : 0.15,
+            depthWrite: false,
+            depthTest: !chosen,
+          }),
+        );
+        box.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+          out, new THREE.Vector3().crossVectors(nrm, out), nrm));
+        box.position.set(...d.wall_world).addScaledVector(out, -p.depth / 2);
+        box.userData.id = item.id;
+        markers.add(box);
+        continue;
+      }
+      geom = new THREE.SphereGeometry(Math.max(p.width / 4, 1.5), 14, 10);
     } else if (item.kind === 'port') {
       geom = new THREE.ConeGeometry(p.outer_radius, p.outer_radius * 1.8, 24);
       axis = pour;
@@ -1749,6 +1790,7 @@ function moldConfig() {
     keys: { enabled: el.optKeys.checked },
     spout: { enabled: el.optSpout.checked },
     vents: { enabled: el.optVents.checked },
+    notches: { enabled: el.optNotches.checked },
     core: { enabled: el.optCore.checked, wall: Number(el.coreWall.value) },
     carrier: { enabled: el.optCarrier.checked },
     core_dowels: { enabled: el.optDowels.checked },
@@ -1887,6 +1929,7 @@ async function showResult(job) {
     ['keys', feat.keys?.count ?? 0],
     ['spout', feat.spout?.length_mm ? `${feat.spout.length_mm.toFixed(0)} mm` : 'none'],
     ['vents', feat.vents?.count ?? 0],
+    ['pry notches', feat.notches?.count ?? 0],
   ];
   if (job.kind === 'mold') {
     rows.splice(2, 0, ['split error', `${r.mold.split_volume_error_cm3.toFixed(5)} cm³`]);

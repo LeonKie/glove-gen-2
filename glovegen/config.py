@@ -103,6 +103,30 @@ class VentConfig:
 
 
 @dataclass
+class NotchConfig:
+    """Pry notches: slots on the seam for levering the halves apart.
+
+    Two rigid halves that close on a drafted key and a cured cast do not come
+    apart by hand, and a seam with nothing to get hold of gets opened with a
+    blade driven into the parting face -- which is the one surface of the mold
+    that has to stay flat. A notch is a shallow pocket cut across the seam at
+    the block's outer wall, half in each half, sized for a flat screwdriver:
+    put the blade in, twist, and the load lands on the pocket instead.
+    """
+
+    enabled: bool = True
+    count: int = 4
+    # Along the seam: room for the blade.
+    width: float = 12.0
+    # Into the block from its outer wall.
+    depth: float = 6.0
+    # Across the seam, split evenly between the halves.
+    height: float = 3.0
+    # Mold left between the pocket and the cavity.
+    cavity_margin: float = 2.0
+
+
+@dataclass
 class CoreConfig:
     """The core: the body a *hollow* cast is formed against.
 
@@ -261,6 +285,7 @@ class MoldConfig:
     keys: KeyConfig = field(default_factory=KeyConfig)
     spout: SpoutConfig = field(default_factory=SpoutConfig)
     vents: VentConfig = field(default_factory=VentConfig)
+    notches: NotchConfig = field(default_factory=NotchConfig)
     core: CoreConfig = field(default_factory=CoreConfig)
     carrier: CarrierConfig = field(default_factory=CarrierConfig)
     core_dowels: CoreDowelConfig = field(default_factory=CoreDowelConfig)
@@ -279,6 +304,7 @@ class MoldConfig:
             "keys": KeyConfig,
             "spout": SpoutConfig,
             "vents": VentConfig,
+            "notches": NotchConfig,
             "core": CoreConfig,
             "carrier": CarrierConfig,
             "core_dowels": CoreDowelConfig,

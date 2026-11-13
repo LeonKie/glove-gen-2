@@ -86,7 +86,7 @@ class TestPipeline:
         """What the run chose, in the form you would hand back to change it."""
         plan = result.report()["feature_plan"]
         assert plan["items"]
-        assert {i["kind"] for i in plan["items"]} <= {"key", "spout", "vent"}
+        assert {i["kind"] for i in plan["items"]} <= {"key", "spout", "vent", "notch"}
         assert all(i["params"] for i in plan["items"])
 
     def test_writes_the_printable_parts(self, result, tmp_path):

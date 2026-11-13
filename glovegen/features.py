@@ -43,7 +43,7 @@ import numpy as np
 import trimesh
 from scipy import ndimage
 
-from .config import KeyConfig, MoldConfig, SpoutConfig, VentConfig
+from .config import KeyConfig, MoldConfig, NotchConfig, SpoutConfig, VentConfig
 from .frame import Frame, principal_axis, unit
 from .mold import MoldResult, local_to_world
 from .parting import PartingSurface
@@ -138,7 +138,9 @@ def _difference(a, b, label="difference"):
 # The order items are cut in, and so the order they are listed in. ``plate``
 # leads because it is the plane cut: it decides how much mold there is at all,
 # and every core item after it stands on the face it leaves.
-KINDS = ("plate", "key", "spout", "vent", "core_tab", "dowel", "screw", "port")
+KINDS = (
+    "plate", "key", "spout", "vent", "notch", "core_tab", "dowel", "screw", "port"
+)
 
 # Kinds that only mean anything when a core was built. They are proposed only
 # for a core run and skipped with a reason otherwise, rather than quietly
@@ -164,6 +166,7 @@ PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
     },
     "spout": {"inner_radius": (0.5, 60.0), "outer_radius": (0.5, 80.0)},
     "vent": {"radius": (0.2, 20.0)},
+    "notch": {"width": (3.0, 40.0), "depth": (2.0, 30.0), "height": (1.0, 10.0)},
     "plate": {"thickness": (2.0, 60.0)},
     "core_tab": {"radius": (0.5, 20.0), "clearance": (0.0, 3.0)},
     "dowel": {
@@ -196,6 +199,9 @@ def _defaults_for(kind: str, cfg: MoldConfig | None = None) -> dict[str, float]:
     if kind == "vent":
         v: VentConfig = cfg.vents
         return {"radius": v.radius}
+    if kind == "notch":
+        n: NotchConfig = cfg.notches
+        return {"width": n.width, "depth": n.depth, "height": n.height}
     if kind == "plate":
         return {"thickness": cfg.carrier.plate_thickness}
     if kind == "core_tab":
@@ -376,6 +382,7 @@ class FeatureContext:
     block: trimesh.Trimesh | None = None
     core: trimesh.Trimesh | None = None
     _free_dist: np.ndarray | None = field(default=None, repr=False)
+    _planes: tuple | None = field(default=None, repr=False)
 
     @classmethod
     def from_mold(
@@ -417,6 +424,56 @@ class FeatureContext:
                 ~surface.constrained, sampling=(dx, dy)
             )
         return self._free_dist
+
+    def block_planes(self) -> tuple[np.ndarray, np.ndarray]:
+        """The block's faces as outward half-spaces ``n . p <= d``.
+
+        Both block shapes are convex, so the block *is* the intersection of
+        these, and how far a point is inside it is just the smallest ``d - n.p``
+        -- no ray casts, and exact on a wall that is not square to anything.
+        """
+        if self.block is None:
+            raise FeatureSkipped("the block's outline is not available for this mold")
+        if self._planes is None:
+            normals = np.asarray(self.block.face_normals, dtype=np.float64)
+            offsets = np.einsum(
+                "ij,ij->i", normals, np.asarray(self.block.triangles[:, 0], dtype=np.float64)
+            )
+            keep = np.linalg.norm(normals, axis=1) > 0.5  # drop degenerate faces
+            self._planes = (normals[keep], offsets[keep])
+        return self._planes
+
+    def inside_block(self, world_pts) -> np.ndarray:
+        """How far inside the block each world point is; negative is outside."""
+        normals, offsets = self.block_planes()
+        pts = np.asarray(world_pts, dtype=np.float64).reshape(-1, 3)
+        out = np.empty(len(pts))
+        step = max(1, 2_000_000 // max(1, len(normals)))
+        for k in range(0, len(pts), step):
+            out[k : k + step] = (offsets[None, :] - pts[k : k + step] @ normals.T).min(axis=1)
+        return out
+
+    def height_at(self, local_xy) -> tuple[float, np.ndarray]:
+        """Parting height and its unit normal (local frame) at a local (x, y).
+
+        Bilinear, unlike :meth:`on_parting`: a notch is a few millimetres tall
+        and has to straddle the seam, so the nearest node is not close enough.
+        """
+        surface = self.surface
+        xs, ys = surface.xs, surface.ys
+        dx = float(xs[1] - xs[0]) if len(xs) > 1 else 1.0
+        dy = float(ys[1] - ys[0]) if len(ys) > 1 else 1.0
+
+        def h(x, y) -> float:
+            coords = [[(x - xs[0]) / dx], [(y - ys[0]) / dy]]
+            return float(
+                ndimage.map_coordinates(surface.h, coords, order=1, mode="nearest")[0]
+            )
+
+        x, y = float(local_xy[0]), float(local_xy[1])
+        hx = (h(x + dx, y) - h(x - dx, y)) / (2.0 * dx)
+        hy = (h(x, y + dy) - h(x, y - dy)) / (2.0 * dy)
+        return h(x, y), unit([-hx, -hy, 1.0])
 
     def node_index(self, local_xy) -> tuple[int, int]:
         """Nearest grid node to a local (x, y)."""
@@ -896,6 +953,252 @@ def _apply_vent(
 
 
 # --------------------------------------------------------------------------
+# pry notches
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class NotchSite:
+    """A notch, worked out: where the seam meets the wall, and which way is in."""
+
+    wall: np.ndarray  # world point on the seam at the block's outer wall
+    outward: np.ndarray  # unit, along the parting face, out of the block
+    normal: np.ndarray  # unit, the parting face's own normal there
+    cavity_clearance: float
+
+
+def _to_the_wall(ctx: FeatureContext, world_point) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Slide a point along the parting surface to the block's outer wall.
+
+    Returns ``(wall, outward, normal)``. The wall aimed for is the one nearest
+    *along the surface*, not the nearest outright: in a shallow block the
+    nearest face to a point on the seam is the lid, and there is no seam there.
+    """
+    normals, offsets = ctx.block_planes()
+    frame = ctx.frame
+    p = np.asarray(world_point, dtype=np.float64).reshape(3)
+    outward = normal = None
+    for _ in range(6):
+        local = frame.to_local(p)
+        z, n_local = ctx.height_at(local)
+        p = frame.to_world(np.array([local[0], local[1], z]))
+        normal = frame.to_world(n_local)
+
+        # Each face's normal, flattened into the parting face: the direction to
+        # walk to reach that wall without leaving the seam, and how far it is.
+        flat = normals - np.outer(normals @ normal, normal)
+        steep = np.linalg.norm(flat, axis=1)
+        side = steep > 0.5
+        if not side.any():
+            raise FeatureSkipped("the parting face does not reach a wall of the block here")
+        travel = np.where(side, (offsets - normals @ p) / np.maximum(steep, 1e-9), np.inf)
+        k = int(np.argmin(travel))
+        outward = flat[k] / steep[k]
+        p = p + outward * travel[k]
+        if abs(travel[k]) < 0.02:
+            break
+    local = frame.to_local(p)
+    z, n_local = ctx.height_at(local)
+    wall = frame.to_world(np.array([local[0], local[1], z]))
+    normal = frame.to_world(n_local)
+    outward = unit(outward - normal * (outward @ normal))
+    return wall, outward, normal
+
+
+def notch_site(
+    ctx: FeatureContext,
+    position,
+    params: dict,
+    *,
+    cavity_margin: float = 2.0,
+    pour_axis=None,
+    ceiling: float | None = None,
+) -> NotchSite:
+    """Where a notch asked for at ``position`` actually goes, or why it cannot.
+
+    ``ceiling`` is the carrier plate's plane along ``pour_axis``, when there is
+    one: the block past it is thrown away, and a slot cut there with it.
+    """
+    width, depth = params["width"], params["depth"]
+    wall, outward, normal = _to_the_wall(ctx, position)
+    along = np.cross(normal, outward)
+
+    if ceiling is not None and pour_axis is not None:
+        if float(wall @ unit(pour_axis)) + width / 2.0 + 1.0 > ceiling:
+            raise FeatureSkipped("past the carrier plate's cut, where there is no seam left")
+
+    # A slot hanging off a corner of the block is half a slot.
+    shoulders = [wall + s * along * (width / 2.0) - outward * 1.0 for s in (-1.0, 1.0)]
+    if ctx.inside_block(shoulders).min() < 0.0:
+        raise FeatureSkipped(
+            f"too close to a corner of the block for a slot {width:.0f} mm wide"
+        )
+
+    # The pocket's footprint, sampled against the cavity's shadow. The free
+    # distance is zero in any column that hits the part, so this is the plan
+    # view of "does the slot break into the cast". Sampled a millimetre apart
+    # all the way in, not just at the far end: a slot deep enough to come out
+    # the other side of a finger has both its ends in solid mold.
+    free = ctx.free_distance()
+    clearance = np.inf
+    for back in np.linspace(0.0, depth, max(2, int(np.ceil(depth)) + 1)):
+        for s in np.linspace(-1.0, 1.0, max(3, int(np.ceil(width)) + 1)):
+            q = wall - outward * back + s * along * (width / 2.0)
+            clearance = min(clearance, float(free[ctx.node_index(ctx.frame.to_local(q))]))
+    if clearance < cavity_margin:
+        raise FeatureSkipped(
+            f"only {clearance:.1f} mm from the cavity at its inner end, "
+            f"needs {cavity_margin:.1f} mm"
+        )
+    return NotchSite(wall=wall, outward=outward, normal=normal, cavity_clearance=clearance)
+
+
+def _clear_of(point: np.ndarray, obstacles, reach: float) -> bool:
+    """Is ``point`` at least ``reach`` from every obstacle?
+
+    An obstacle is ``(origin, axis, radius)``: a ball when ``axis`` is ``None``,
+    otherwise a rod running from ``origin`` along ``axis`` and never ending --
+    which is what a spout or a dowel bore is, as far as the block is concerned.
+    """
+    for origin, axis, radius in obstacles:
+        rel = point - np.asarray(origin, dtype=np.float64)
+        if axis is not None:
+            a = unit(axis)
+            rel = rel - a * max(float(rel @ a), 0.0)
+        if float(np.linalg.norm(rel)) < radius + reach:
+            return False
+    return True
+
+
+def find_notch_sites(
+    ctx: FeatureContext,
+    cfg: NotchConfig,
+    *,
+    pour_axis=None,
+    ceiling: float | None = None,
+    avoid=(),
+) -> list[NotchSite]:
+    """Spread pry notches around the seam where it meets the block's wall.
+
+    Candidates are the parting-grid nodes just inside the wall; each is slid
+    out to the wall and checked exactly as a hand-placed one would be, so the
+    automatic pass can never propose something the cut then refuses. ``avoid``
+    is everything else that surfaces on the seam, as :func:`_clear_of` takes it.
+    """
+    if ctx.block is None or cfg.count <= 0:
+        return []
+    surface = ctx.surface
+    nx, ny = surface.shape
+    dx = float(surface.xs[1] - surface.xs[0]) if nx > 1 else 1.0
+    dy = float(surface.ys[1] - surface.ys[0]) if ny > 1 else 1.0
+
+    # A few thousand nodes are plenty to find the rim, and a hull block has
+    # thousands of faces to test each one against.
+    stride = max(1, int(np.ceil(np.sqrt(nx * ny / 6000.0))))
+    ii, jj = np.meshgrid(
+        np.arange(0, nx, stride), np.arange(0, ny, stride), indexing="ij"
+    )
+    ii, jj = ii.ravel(), jj.ravel()
+    world = ctx.frame.to_world(
+        np.column_stack([surface.xs[ii], surface.ys[jj], surface.h[ii, jj]])
+    )
+    inside = ctx.inside_block(world)
+    rim = (inside > -1e-6) & (inside <= 1.5 * stride * max(dx, dy))
+    world = world[rim]
+    if len(world) > 400:
+        world = world[np.linspace(0, len(world) - 1, 400).astype(int)]
+
+    params = {"width": cfg.width, "depth": cfg.depth, "height": cfg.height}
+    reach = float(np.hypot(cfg.depth, cfg.width / 2.0)) + 2.0
+    sites: list[NotchSite] = []
+    for point in world:
+        try:
+            site = notch_site(
+                ctx,
+                point,
+                params,
+                cavity_margin=cfg.cavity_margin,
+                pour_axis=pour_axis,
+                ceiling=ceiling,
+            )
+        except FeatureSkipped:
+            continue
+        if _clear_of(site.wall, avoid, reach):
+            sites.append(site)
+    if not sites:
+        log.warning("no room on the seam for pry notches")
+        return []
+
+    # Farthest-point sampling again, as for the keys: start where there is the
+    # most mold behind the slot, then keep taking whichever candidate is
+    # furthest from everything chosen so far. Levering a mold open from one
+    # side only racks it on its keys; from all round, it lifts.
+    pts = np.array([s.wall for s in sites])
+    chosen = [int(np.argmax([s.cavity_clearance for s in sites]))]
+    min_gap = np.full(len(pts), np.inf)
+    while len(chosen) < cfg.count:
+        min_gap = np.minimum(min_gap, np.linalg.norm(pts - pts[chosen[-1]], axis=1))
+        nxt = int(np.argmax(min_gap))
+        if min_gap[nxt] < 3.0 * cfg.width:
+            break
+        chosen.append(nxt)
+    return [sites[c] for c in chosen]
+
+
+def _apply_notch(
+    half_a: trimesh.Trimesh,
+    half_b: trimesh.Trimesh,
+    ctx: FeatureContext,
+    item: FeatureItem,
+    cfg: MoldConfig,
+    *,
+    pour_axis=None,
+    ceiling: float | None = None,
+) -> tuple[trimesh.Trimesh, trimesh.Trimesh, dict]:
+    """Cut one pry slot across the seam, half out of each half.
+
+    The pocket is a box lying in the parting face, open to the outside of the
+    block. It only ever takes material away and nothing is cast in it, so it
+    cannot lock anything: there is no groove rule to obey here, only the cavity
+    to stay out of.
+    """
+    p = item.params
+    width, depth, height = p["width"], p["depth"], p["height"]
+    site = notch_site(
+        ctx,
+        item.position,
+        p,
+        cavity_margin=cfg.notches.cavity_margin,
+        pour_axis=pour_axis,
+        ceiling=ceiling,
+    )
+
+    # Run on past the wall: on a hull block the wall leans, and a box stopped
+    # dead at the seam would leave a sliver across the mouth of one half.
+    over = 3.0 + height
+    along = np.cross(site.normal, site.outward)
+    transform = np.eye(4)
+    transform[:3, 0] = site.outward
+    transform[:3, 1] = along
+    transform[:3, 2] = site.normal
+    transform[:3, 3] = site.wall + site.outward * (over - depth) / 2.0
+    slot = trimesh.creation.box(extents=(depth + over, width, height), transform=transform)
+
+    half_a = _difference(half_a, slot, "notch -> A")
+    half_b = _difference(half_b, slot, "notch -> B")
+    return half_a, half_b, {
+        "id": item.id,
+        "wall_world": [round(float(x), 2) for x in site.wall],
+        "outward": [round(float(x), 4) for x in site.outward],
+        "normal": [round(float(x), 4) for x in site.normal],
+        "width_mm": round(width, 2),
+        "depth_mm": round(depth, 2),
+        "height_mm": round(height, 2),
+        "cavity_clearance_mm": round(site.cavity_clearance, 2),
+    }
+
+
+# --------------------------------------------------------------------------
 # planning and applying
 # --------------------------------------------------------------------------
 
@@ -927,6 +1230,7 @@ class FeatureReport:
     keys: dict = field(default_factory=dict)
     spout: dict = field(default_factory=dict)
     vents: dict = field(default_factory=dict)
+    notches: dict = field(default_factory=dict)
     # Only a core run fills this in: the wall it measured, the plate it cut and
     # what the seam tabs cost the cast.
     core: dict = field(default_factory=dict)
@@ -941,6 +1245,7 @@ class FeatureReport:
             "keys": self.keys,
             "spout": self.spout,
             "vents": self.vents,
+            "notches": self.notches,
             "core": self.core,
             "items": self.items,
         }
@@ -985,6 +1290,11 @@ def plan_features(
             f"cuts the mold {state.discarded_note}",
         )
 
+    # Everything that surfaces on the seam, for the notches to keep clear of.
+    # They are planned last for that reason: a slot is the one feature that can
+    # go almost anywhere, so it is the one that gives way.
+    seam_users: list = []
+
     allow = None
     if ceiling is not None:
         from . import core as core_mod
@@ -1005,6 +1315,7 @@ def plan_features(
                     note=f"{site.clearance_to_cavity:.1f} mm clear of the cavity",
                 )
             )
+            seam_users.append((items[-1].position, None, cfg.keys.radius + cfg.keys.clearance))
 
     # With a plate on, the cavity's high point along the pour axis *is* the cut
     # face, and the plate seals the annulus shut over it. A spout aimed there
@@ -1014,6 +1325,7 @@ def plan_features(
     if cfg.spout.enabled and not (state is not None and state.has_plate):
         spout_world = spout_entry(ctx.cavity, ctx, pour_axis)
         add("spout", spout_world, "cavity high point along the pour axis")
+        seam_users.append((spout_world, pour_axis, cfg.spout.outer_radius))
 
     if cfg.vents.enabled:
         traps = find_air_traps(
@@ -1037,12 +1349,16 @@ def plan_features(
             ):
                 add("core_tab", anchor, "pinched on the parting seam", n)
                 seam.append(grip)
+                seam_users.append(
+                    (anchor, None, cfg.core_tabs.radius + cfg.core_tabs.anchor_margin)
+                )
         if cfg.core_dowels.enabled:
             for n, (anchor, grip) in enumerate(
                 core_mod.find_dowel_sites(ctx, state, cfg, avoid=seam), start=1
             ):
                 add("dowel", anchor, "a pin locks the core to both halves", n)
                 seam.append(grip)
+                seam_users.append((anchor, anchor - grip, cfg.core_dowels.radius))
         if state.has_plate:
             port = core_mod.find_port_site(ctx, state)
             if port is not None:
@@ -1054,6 +1370,16 @@ def plan_features(
                 start=1,
             ):
                 add("screw", point, "clamps the plate down", n)
+                seam_users.append((point, -pour_axis, cfg.carrier.screw_radius))
+
+    if cfg.notches.enabled:
+        for n, site in enumerate(
+            find_notch_sites(
+                ctx, cfg.notches, pour_axis=pour_axis, ceiling=ceiling, avoid=seam_users
+            ),
+            start=1,
+        ):
+            add("notch", site.wall, "pry slot on the seam, for a flat screwdriver", n)
 
     plan = FeaturePlan(items=items, pour_axis=[float(v) for v in pour_axis])
     log.info(
@@ -1114,6 +1440,9 @@ def _aggregate(report: FeatureReport, plan: FeaturePlan, details: dict[str, list
             "radius_mm": max((v["radius_mm"] for v in vents), default=0.0),
             "vents": vents,
         }
+    if plan.of_kind("notch"):
+        notches = details["notch"]
+        report.notches = {"count": len(notches), "notches": notches}
     for kind in CORE_KINDS:
         if kind != "plate" and plan.of_kind(kind):
             report.core[f"{kind}s"] = details[kind]
@@ -1179,6 +1508,16 @@ def apply_plan(
             elif item.kind == "vent":
                 bodies.half_a, bodies.half_b, detail = _apply_vent(
                     bodies.half_a, bodies.half_b, ctx, item
+                )
+            elif item.kind == "notch":
+                bodies.half_a, bodies.half_b, detail = _apply_notch(
+                    bodies.half_a,
+                    bodies.half_b,
+                    ctx,
+                    item,
+                    cfg,
+                    pour_axis=pour_axis,
+                    ceiling=state.plane if state is not None else None,
                 )
             elif item.kind == "plate":
                 detail = core_mod.apply_plate(bodies, ctx, item, state, cfg)

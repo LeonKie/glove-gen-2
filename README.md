@@ -2,7 +2,8 @@
 
 Turn a high-detail positive scan into a 3D-printable, castable **two-part rigid
 mold**: a block with the scanned shape hollowed out of it, split along a curved
-parting surface, with alignment keys, a pour spout and vents.
+parting surface, with alignment keys, a pour spout, vents and pry notches for
+getting it open again.
 
 Runs end to end on the real 2.6M-triangle `Hand_Child.stl` scan in **~50
 seconds**, at full input resolution — no decimation of the cavity.
@@ -18,7 +19,8 @@ pip install -e .
 # analysis only: which way should the mold pull?
 glovegen analyze data/samples/Hand_Child.stl --heatmap heat.ply
 
-# build the mold: keys, pour spout and vents are chosen and cut automatically
+# build the mold: keys, pour spout, vents and pry notches are chosen and cut
+# automatically
 glovegen mold data/samples/Hand_Child.stl -o out/
 
 # same, with bigger knobs and a wider spout
@@ -192,6 +194,28 @@ pull direction, where they release by construction. Never in between.
   axis, one per connected pocket (a flat ceiling is one pocket however many cells
   it spans). Each is routed along whichever of `±d` does not re-enter the cavity.
 
+- **Pry notches** — slots across the seam at the block's outer wall, half in
+  each half, sized for a flat screwdriver (12 × 6 × 3 mm by default). Two rigid
+  halves closed on drafted keys and a cured cast do not come apart by hand, and
+  a seam with nothing to get hold of gets opened by driving a blade into the
+  parting face — the one surface that has to stay flat. Blade in the slot,
+  twist, and the load lands on the pocket instead.
+
+  Both block shapes are convex, so "where is the wall" is a min over the
+  block's face planes rather than a ray cast, and it is exact on a hull block
+  whose wall is square to nothing. A notch is slid along the parting surface to
+  the nearest wall *along the surface* — in a shallow block the nearest face
+  outright is the lid — and the pocket is laid in the parting face's own
+  tangent plane there. It is refused if its footprint comes within
+  `notches.cavity_margin` of the cavity's shadow, hangs off a corner of the
+  block, or lands past a carrier plate's cut.
+
+  They are planned last and keep clear of everything else that surfaces on the
+  seam — keys, the spout, tabs, dowel bores, plate screws — then spread by the
+  same farthest-point sampling as the keys: levering from one side only racks
+  the mold on its keys, from all round it lifts. Nothing is cast in a notch and
+  it only takes material away, so there is no groove rule to obey.
+
 ### 6. Choosing the features, and changing your mind
 
 Deciding *where* the knobs and holes go is separated from cutting them. The
@@ -211,15 +235,16 @@ be hands-off in one place and interactive in another:
 
 - **The CLI is automatic.** `glovegen mold part.stl -o out/` plans and cuts in
   one go — no prompts, no second command. `--key-radius`, `--vent-radius`,
-  `--spout-outer` and friends change the sizes it picks; `--plan plan.json`
+  `--spout-outer`, `--notch-width` and friends change the sizes it picks,
+  `--notches N` / `--no-notches` how many slots the seam gets; `--plan plan.json`
   replaces its choices outright. The plan a run used comes back in
   `report.json` under `feature_plan`, so the edit loop is
   `jq`, edit, re-run with `--plan`.
 - **The web app is interactive, after the mold exists.** The build returns its
   proposal and every knob and hole becomes a row you can resize, switch off or
   delete, with markers in the viewport that track the sizes as you type. New
-  ones are placed by clicking: knobs and spouts on the parting surface, vents
-  on the scan. "Re-apply" runs a `features` job.
+  ones are placed by clicking: knobs, spouts and notches on the parting surface
+  (a notch snaps to the nearest wall), vents on the scan. "Re-apply" runs a `features` job.
 
 A re-apply does not rebuild the mold. The mold job caches the halves *as they
 came out of the split*, the parting surface and the block's bounds; nothing in
@@ -490,7 +515,7 @@ server/
   worker.py         job bodies (prepare | analyze | mold | features), out-of-process
   static/           three.js viewer: live heatmap, the pour-axis handle, then
                     the editable feature plan
-tests/              218 tests
+tests/              230 tests
 ```
 
 ## Deployment
